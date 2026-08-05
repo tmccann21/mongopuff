@@ -1,0 +1,27 @@
+CLAUDE.md
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+mongodpuff
+
+# Test binary
+*.test
+
+# Go build cache
+*.out
+
+# Dependency directory
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
