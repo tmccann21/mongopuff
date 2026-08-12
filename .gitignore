@@ -6,7 +6,7 @@ CLAUDE.md
 *.dll
 *.so
 *.dylib
-mongodpuff
+mongopuff
 
 # Test binary
 *.test
@@ -25,3 +25,5 @@ vendor/
 
 # OS
 .DS_Store
+
+specs/

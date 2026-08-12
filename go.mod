@@ -1,3 +1,3 @@
-module github.com/tmccann21/mongodpuff
+module github.com/tmccann21/mongopuff
 
 go 1.26.5
