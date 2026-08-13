@@ -185,7 +185,7 @@ through two principles:
   - updates written to turbopuffer will contain a `_clusterTime` attribute. This is set by the writer (either CDC or backfill) and is used for conditional writes
 
 ## Batching
-CDC and Backfill share the same batching logic (different buffers). Configurable with the following defaults:
+CDC uses a batcher with the following default properties (configurable):
 
 flush document limit: 1024
 flush bytes limit: 8mb
@@ -194,8 +194,9 @@ flush interval: 1s
 after flushing, and confirming the write to tpuff the new resume stream token should be written to the relevant collection. must wait for tpuff confirmation; failing to persist the token is not a large issue as we only guarantee at-least-once delivery and this failure should be rare
 
 on partial failures within a batch, write the failing documents to DLQ and retry the batch without the offending documents
-
 within a batch no two updates can reference the same document by id. if this collision occurs, use the most recent
+
+Backfill batching is handled implicitly by page size, and therefore does not have any additional batcher logic
 
 # CLI
 mongopuff exposes two commands as a CLI
