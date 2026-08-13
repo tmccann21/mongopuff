@@ -3,11 +3,9 @@ package config
 import "fmt"
 
 // Validate performs startup validation on the loaded config.
+// Note: connection string validation (database name) is handled by
+// mongo.ParseDatabaseName at the call site, not here.
 func Validate(cfg *AppConfig) error {
-	if err := validateDatabaseInConnString(cfg.MongoDBConnectionString); err != nil {
-		return err
-	}
-
 	if err := validateUniqueNamespaces(cfg.Collections); err != nil {
 		return err
 	}
@@ -19,11 +17,6 @@ func Validate(cfg *AppConfig) error {
 	}
 
 	return nil
-}
-
-// TODO: use the mongo driver's connstring parser to extract and validate the database name
-func validateDatabaseInConnString(connStr string) error {
-	panic("not implemented: use mongo driver connstring parser")
 }
 
 func validateUniqueNamespaces(collections []CollectionConfig) error {

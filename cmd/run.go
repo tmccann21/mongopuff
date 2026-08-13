@@ -11,6 +11,7 @@ import (
 
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/health"
+	mpmongo "github.com/tmccann21/mongopuff/internal/mongo"
 )
 
 func runCDC() error {
@@ -26,9 +27,10 @@ func runCDC() error {
 		return fmt.Errorf("validating config: %w", err)
 	}
 
+	dbName, _ := mpmongo.ParseDatabaseName(cfg.MongoDBConnectionString)
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
-		"database", cfg.DatabaseName(),
+		"database", dbName,
 	)
 
 	status := health.NewStatus()

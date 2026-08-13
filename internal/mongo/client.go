@@ -49,6 +49,15 @@ type DLQEntry struct {
 	CreatedAt    time.Time `bson:"createdAt"`
 }
 
+// CollectionState is the shape of a document in the _mongopuff_state collection.
+// Managed by the service.
+type CollectionState struct {
+	Name                    string    `bson:"_id"`
+	ChangeStreamResumeToken []byte    `bson:"changeStreamResumeToken,omitempty"`
+	BackfillCursor          any       `bson:"backfillCursor,omitempty"`
+	LastFlushTime           time.Time `bson:"lastFlushTime,omitempty"`
+}
+
 // ChangeEvent represents a parsed MongoDB change stream event.
 type ChangeEvent struct {
 	Operation     Operation

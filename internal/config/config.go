@@ -51,14 +51,12 @@ type MappingConfig struct {
 }
 
 // CollectionConfig is the shape of a document in the _mongopuff collection.
+// Managed by the operator.
 type CollectionConfig struct {
-	Name                    string        `bson:"_id"`
-	ChangeStreamResumeToken []byte        `bson:"changeStreamResumeToken,omitempty"`
-	BackfillCursor          any           `bson:"backfillCursor,omitempty"`
-	BackfillPageSize        int           `bson:"backfillPageSize,omitempty"`
-	MirrorDeletes           *bool         `bson:"mirrorDeletes,omitempty"`
-	LastFlushTime           time.Time     `bson:"lastFlushTime,omitempty"`
-	Mapping                 MappingConfig `bson:"mapping"`
+	Name             string        `bson:"_id"`
+	BackfillPageSize int           `bson:"backfillPageSize,omitempty"`
+	MirrorDeletes    *bool         `bson:"mirrorDeletes,omitempty"`
+	Mapping          MappingConfig `bson:"mapping"`
 }
 
 func (c *CollectionConfig) MirrorDeletesEnabled() bool {
@@ -117,12 +115,6 @@ type AppConfig struct {
 
 	Global      GlobalConfig
 	Collections []CollectionConfig
-}
-
-// DatabaseName extracts the database name from the MongoDB connection string.
-// TODO: use the mongo driver's connstring parser instead of url.Parse
-func (a *AppConfig) DatabaseName() string {
-	panic("not implemented: use mongo driver connstring parser")
 }
 
 // Collection looks up a collection config by name.

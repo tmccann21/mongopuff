@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	mongopuffCollection = "_mongopuff"
-	globalDocID         = "_global"
+	mongopuffCollection      = "_mongopuff"
+	mongopuffStateCollection = "_mongopuff_state"
+	globalDocID              = "_global"
 )
 
 type Store struct {

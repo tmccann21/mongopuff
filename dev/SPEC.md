@@ -54,21 +54,18 @@ LOG_LEVEL
 MONGODB_CONNECTION_STRING (must include database name, e.g. mongodb://host/mydb)
 TURBOPUFFER_API_KEY
 
-The service is scoped to a single MongoDB database, determined by the database in the connection string. Startup fails if the connection string does not include a database. _mongopuff and _mongopuff_dlq collections are created in this database.
+The service is scoped to a single MongoDB database, determined by the database in the connection string. Startup fails if the connection string does not include a database. _mongopuff_state and _mongopuff_dlq collections are created by the service in this database. _mongopuff is managed by the operator.
 
 ## _mongopuff
-_mongopuff is a collection created on the mongodb to store configurations per-collection
+_mongopuff is a collection managed by the operator to store configurations per-collection
 
 documents in this collection have the following shape
 
 ```
 {
   _id: <collection name>
-  changeStreamResumeToken: <token bson document>
-  backfillCursor: <_idlast backfilled document>
   backfillPageSize: <int; default 128>
   mirrorDeletes: <boolean>
-  lastFlushTime: <timestamp>
   mapping: {
     namespace: <string; tpuff namespace name (default to collection name)>
     fields: [
@@ -86,6 +83,20 @@ documents in this collection have the following shape
 Mapping documents are managed directly by the operator in MongoDB
 The service reads all _mongopuff documents once at startup; changes require a restart to take effect
 
+## _mongopuff_state
+_mongopuff_state is a collection created and managed by the service to store runtime state per-collection. Operators should not edit this collection.
+
+documents in this collection have the following shape
+
+```
+{
+  _id: <collection name>
+  changeStreamResumeToken: <token bson document>
+  backfillCursor: <_id of last backfilled document>
+  lastFlushTime: <timestamp>
+}
+```
+
 Service level configurations are created in a special document with id _global, this includes:
 - batch flush count (default 1024)
 - batch flush size (default 8mb)
@@ -96,7 +107,7 @@ Service is written in modern Go, with minimal external dependencies. It is light
 base functionality and throughput over advanced features.
 
 ## Graceful Shutdown
-intercept SIGTERM/SIGINT, flush pending batch and save resume token for each collection to their respective documents. Each go-routine
+intercept SIGTERM/SIGINT, flush pending batch and save resume token for each collection to _mongopuff_state. Each go-routine
 handles this independently. Flush gets 1 try before writing remaining data to DLQ to not risk total loss.
 
 # Modes
@@ -177,7 +188,7 @@ id field should use the _id field from the corresponding document; serialized ac
 
 # Requirements
 ## At-least-once delivery
-Store resume token in the _mongopuff document for each collection; restart from resume token on crash/shutdown. Effectively-once delivery achieved
+Store resume token in _mongopuff_state for each collection; restart from resume token on crash/shutdown. Effectively-once delivery achieved
 through two principles:
 
 1. idempotent upsert/delete operations
