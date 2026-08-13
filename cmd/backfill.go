@@ -9,8 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/tmccann21/mongopuff/internal/config"
 )
 
 func runBackfill() error {
@@ -27,13 +25,9 @@ func runBackfill() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := config.Load(ctx)
+	cfg, _, err := loadConfig(ctx)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	if err := config.Validate(cfg); err != nil {
-		return fmt.Errorf("validating config: %w", err)
+		return err
 	}
 
 	collCfg, ok := cfg.Collection(*collection)
@@ -44,7 +38,6 @@ func runBackfill() error {
 	slog.Info("starting backfill", "collection", collCfg.Name)
 
 	// TODO: wire up backfill loop: ping → scan page → upsert → advance cursor
-	_ = ctx
 
 	return nil
 }

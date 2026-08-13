@@ -1,7 +1,6 @@
 package config
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -127,21 +126,7 @@ func (a *AppConfig) Collection(name string) (CollectionConfig, bool) {
 	return CollectionConfig{}, false
 }
 
-// Load reads environment variables and _mongopuff collection documents.
-func Load(ctx context.Context) (*AppConfig, error) {
-	cfg, err := loadEnv()
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: connect to MongoDB and read _mongopuff documents.
-	_ = ctx
-
-	cfg.Global = GlobalConfig{}.Effective()
-	return cfg, nil
-}
-
-func loadEnv() (*AppConfig, error) {
+func LoadEnv() (*AppConfig, error) {
 	port := 8080
 	if s := os.Getenv("HEALTH_PORT"); s != "" {
 		p, err := strconv.Atoi(s)

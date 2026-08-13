@@ -11,23 +11,19 @@ import (
 
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/health"
-	mpmongo "github.com/tmccann21/mongopuff/internal/mongo"
+	"github.com/tmccann21/mongopuff/internal/mongo"
 )
 
 func runCDC() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := config.Load(ctx)
+	cfg, store, err := loadConfig(ctx)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
 
-	if err := config.Validate(cfg); err != nil {
-		return fmt.Errorf("validating config: %w", err)
-	}
-
-	dbName, _ := mpmongo.ParseDatabaseName(cfg.MongoDBConnectionString)
+	dbName, _ := mongo.ParseDatabaseName(cfg.MongoDBConnectionString)
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
 		"database", dbName,
@@ -50,7 +46,7 @@ func runCDC() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runCollectionCDC(ctx, cfg, coll, status); err != nil {
+			if err := runCollectionCDC(ctx, cfg, store, coll, status); err != nil {
 				slog.Error("collection CDC stopped", "collection", coll.Name, "error", err)
 			}
 		}()
@@ -61,9 +57,10 @@ func runCDC() error {
 	return nil
 }
 
-func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, coll config.CollectionConfig, status *health.Status) error {
+func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, coll config.CollectionConfig, status *health.Status) error {
 	_ = ctx
 	_ = cfg
+	_ = store
 	_ = coll
 	_ = status
 	// TODO: wire up change stream → transform → batch → write pipeline
