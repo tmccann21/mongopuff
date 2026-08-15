@@ -22,14 +22,13 @@ func Validate(cfg *AppConfig) error {
 func validateUniqueNamespaces(collections []CollectionConfig) error {
 	seen := make(map[string]string) // namespace → collection name
 	for _, c := range collections {
-		ns := c.Mapping.Namespace
-		if ns == "" {
-			ns = c.Name
+		if c.Mapping.Namespace == "" {
+			return fmt.Errorf("collection %q has no namespace (should have been resolved by the config loader)", c.Name)
 		}
-		if other, exists := seen[ns]; exists {
-			return fmt.Errorf("collections %q and %q both map to namespace %q", other, c.Name, ns)
+		if other, exists := seen[c.Mapping.Namespace]; exists {
+			return fmt.Errorf("collections %q and %q both map to namespace %q", other, c.Name, c.Mapping.Namespace)
 		}
-		seen[ns] = c.Name
+		seen[c.Mapping.Namespace] = c.Name
 	}
 	return nil
 }

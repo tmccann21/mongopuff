@@ -6,43 +6,47 @@ Unit tests. Parse a `_mongopuff` config (or set of configs) and assert validatio
 The system under test is the config loader/validator — no MongoDB or turbopuffer connection needed. Feed it
 a struct or JSON representation of the `_mongopuff` documents + a `_global` document and assert the result.
 
-### valid_config_minimal
+### valid_config_minimal :white_check_mark:
 Single collection, one string field, namespace defaults to collection name.
 Validation passes. Confirm the resolved namespace equals the collection name.
 
-### valid_config_custom_namespace
+### valid_config_custom_namespace :white_check_mark:
 Collection `orders` maps to namespace `order_data`.
 Validation passes. Confirm the resolved namespace is `order_data`, not `orders`.
 
-### valid_config_all_field_types
+### valid_config_all_field_types :white_check_mark:
 One collection with a field for every supported type: string, int, uint, float, bool, uuid, datetime,
 []string, []int, []uint, []float, []bool, []uuid, []datetime, and a vector field with dimension=128 precision=f32.
 Validation passes.
 
-### invalid_config_duplicate_namespace
+### invalid_config_duplicate_namespace :white_check_mark:
 Two collections both map to namespace `users`. Validation fails with an error mentioning the duplicate namespace.
 
-### invalid_config_unknown_field_type
+### invalid_config_empty_namespace :white_check_mark:
+Collection `foo` has no namespace set. Validation fails — empty namespace means the config loader
+didn't resolve the default, and the validator should reject it rather than silently compensating.
+
+### invalid_config_unknown_field_type :white_check_mark:
 A field specifies type `"map"`. Validation fails with an error identifying the bad type and which field it's on.
 
-### invalid_config_vector_missing_dimension
+### invalid_config_vector_missing_dimension :white_check_mark:
 Vector field has precision=f32 but no dimension. Validation fails.
 
-### invalid_config_vector_missing_precision
+### invalid_config_vector_missing_precision :white_check_mark:
 Vector field has dimension=128 but no precision. Validation fails.
 
-### invalid_config_vector_bad_precision
+### invalid_config_vector_bad_precision :white_check_mark:
 Vector field has dimension=128, precision=`"f64"` (not one of f32/f16/i8). Validation fails.
 
-### invalid_config_no_database_in_connstring
+### invalid_config_no_database_in_connstring :white_check_mark:
 Connection string is `mongodb://localhost` with no database component.
 Validation fails at startup before any collection configs are read.
 
-### valid_config_global_defaults
+### valid_config_global_defaults :white_check_mark:
 No `_global` document exists. After loading, the effective config should have
 batch flush count=1024, size=8MB, interval=1s.
 
-### valid_config_global_overrides
+### valid_config_global_overrides :white_check_mark:
 `_global` document sets batch flush count=512. After loading, effective flush count is 512;
 size and interval remain at defaults.
 
