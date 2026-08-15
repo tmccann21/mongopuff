@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -91,4 +92,36 @@ func (s *Store) LoadGlobalConfig(ctx context.Context) (config.GlobalConfig, erro
 	}
 
 	return gc, nil
+}
+
+func (s *Store) SaveResumeToken(ctx context.Context, collection string, resumeToken []byte) error {
+	coll := s.db.Collection(mongopuffStateCollection)
+
+	_, err := coll.UpdateOne(ctx, bson.M{"_id": collection}, bson.M{"$set": bson.M{"changeStreamResumeToken": resumeToken}}, options.UpdateOne().SetUpsert(true))
+	return err
+}
+
+func (s *Store) SaveLastFlushTime(ctx context.Context, collection string, lastFlushTime time.Time) error {
+	coll := s.db.Collection(mongopuffStateCollection)
+
+	_, err := coll.UpdateOne(ctx, bson.M{"_id": collection}, bson.M{"$set": bson.M{"lastFlushTime": lastFlushTime}}, options.UpdateOne().SetUpsert(true))
+	return err
+}
+
+func (s *Store) LoadCollectionState(ctx context.Context, collection string) (CollectionState, error) {
+	coll := s.db.Collection(mongopuffStateCollection)
+
+	var cs CollectionState
+	err := coll.FindOne(ctx, bson.M{"_id": collection}).Decode(&cs)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return CollectionState{}, nil
+	}
+	if err != nil {
+		return CollectionState{}, fmt.Errorf("reading collection state: %w", err)
+	}
+	return cs, nil
+}
+
+func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte) (*LiveChangeStream, error) {
+	return OpenChangeStream(ctx, s.db, collection, resumeToken)
 }

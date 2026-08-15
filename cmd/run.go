@@ -8,10 +8,13 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/tmccann21/mongopuff/internal/batch"
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/health"
 	"github.com/tmccann21/mongopuff/internal/mongo"
+	"github.com/tmccann21/mongopuff/internal/transform"
 )
 
 func runCDC() error {
@@ -58,11 +61,76 @@ func runCDC() error {
 }
 
 func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, coll config.CollectionConfig, status *health.Status) error {
-	_ = ctx
-	_ = cfg
-	_ = store
-	_ = coll
-	_ = status
-	// TODO: wire up change stream → transform → batch → write pipeline
+	slog.Info("starting CDC", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
+
+	state, err := store.LoadCollectionState(ctx, coll.Name)
+	if err != nil {
+		return err
+	}
+
+	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken)
+	if err != nil {
+		return err
+	}
+	defer stream.Close(ctx)
+
+	// Create batcher with flush function.
+	// TODO: wire real turbopuffer client and DLQ writer
+	namespace := coll.Mapping.Namespace
+	batcher := batch.New(ctx, namespace, cfg.Global, func(
+		ctx context.Context, ns string, actions []transform.Action, resumeToken []byte,
+	) error {
+		slog.Info("flush",
+			"namespace", ns,
+			"actions", len(actions),
+		)
+		for _, a := range actions {
+			slog.Info("  action",
+				"type", a.Type,
+				"documentId", a.DocumentID,
+			)
+		}
+
+		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
+			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
+		}
+
+		status.SetCollectionFlushTime(coll.Name, time.Now())
+		return nil
+	})
+
+	for stream.Next(ctx) {
+		event, err := stream.Event()
+		if err != nil {
+			slog.Error("change stream event error", "collection", coll.Name, "error", err)
+			continue
+		}
+
+		slog.Debug("change event",
+			"collection", coll.Name,
+			"operation", event.Operation,
+			"documentId", event.DocumentID,
+			"clusterTime", event.ClusterTime,
+		)
+
+		action, err := transform.MapChangeEvent(event, coll)
+		if err != nil {
+			slog.Error("transform error", "collection", coll.Name, "error", err)
+			return err
+		}
+
+		if err := batcher.Add(action, stream.ResumeToken()); err != nil {
+			return fmt.Errorf("batch flush failed: %w", err)
+		}
+	}
+
+	if err := batcher.Flush(); err != nil {
+		slog.Error("final flush failed", "collection", coll.Name, "error", err)
+	}
+
+	if _, err := stream.Event(); err != nil {
+		return fmt.Errorf("change stream error: %w", err)
+	}
+
 	return nil
 }
