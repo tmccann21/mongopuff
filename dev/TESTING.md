@@ -51,31 +51,41 @@ size and interval remain at defaults.
 Unit tests. The system under test is the ID serializer — takes a BSON `_id` value and returns a string
 for use as the turbopuffer document ID. No external dependencies.
 
-### id_objectid
+### id_objectid :white_check_mark:
 ObjectId `_id`. Output should be the 24-character hex string (e.g. `"507f1f77bcf86cd799439011"`).
 
-### id_string
+### id_string :white_check_mark:
 String `_id` `"my-doc-1"`. Output should pass through unchanged.
 
-### id_int32
+### id_int32 :white_check_mark:
 Int32 `_id` with value `42`. Output should be `"42"`.
 
-### id_int64
+### id_int64 :white_check_mark:
 Int64 `_id` with a large value like `9223372036854775807`. Output should be the decimal string representation.
 
-### id_binary_uuid
+### id_binary_uuid :white_check_mark:
 Binary `_id` with UUID subtype. Output should be the canonical UUID string (e.g. `"550e8400-e29b-41d4-a716-446655440000"`).
 
-### id_unsupported_type
+### id_int32_negative :white_check_mark:
+Int32 `_id` with value `-1`. Output should be `"-1"`. Ensures sign is preserved in decimal serialization.
+
+### id_binary_non_uuid :white_check_mark:
+Binary `_id` with a non-UUID subtype (e.g. generic `0x00`). Serializer should return an error —
+only the UUID subtype (`0x04`) is accepted.
+
+### id_binary_uuid_wrong_length :white_check_mark:
+Binary `_id` with UUID subtype but data length is not 16 bytes. Serializer should return an error.
+
+### id_unsupported_type :white_check_mark:
 `_id` is a Decimal128 or Array. Serializer should return an error. At startup this is fatal; during
 event processing this would be logged and skipped.
 
-### cluster_time_serialization
+### cluster_time_serialization :white_check_mark:
 BSON Timestamp with T=1, I=2. Should serialize to uint64 `(1<<32)|2 = 4294967298`. Verify the
 serialization preserves total ordering — a timestamp with a higher T or same T but higher I
 must produce a larger uint64.
 
-### id_missing_on_event
+### id_missing_on_event :white_check_mark:
 Change event arrives with no `_id` field present. Should log and skip the event (id_missing error kind).
 No DLQ write, no retry.
 
@@ -122,41 +132,41 @@ Document has fields `name`, `email`, `age` but only `name` and `email` are in th
 Unit tests. The system under test is the event mapper — takes a change stream event struct + collection
 config and returns a turbopuffer action (upsert, patch, delete, stop, or skip). No external dependencies.
 
-### event_insert
+### event_insert :white_check_mark:
 Insert event with a full document containing mapped fields. Should produce a turbopuffer upsert
 with all mapped fields present plus a `_clusterTime` attribute from the event's cluster time.
 
-### event_replace
+### event_replace :white_check_mark:
 Replace event with a full document. Should produce a turbopuffer upsert identical in shape to an insert —
 full document replacement, all mapped fields + `_clusterTime`.
 
-### event_update_mapped_fields
+### event_update_mapped_fields :white_check_mark:
 Update event where `updateDescription.updatedFields` includes a mapped field. Should produce a
 turbopuffer patch containing only the changed mapped fields. Unchanged mapped fields should not
 be included in the patch.
 
-### event_update_unmapped_fields_only
+### event_update_unmapped_fields_only :white_check_mark:
 Update event where `updateDescription.updatedFields` only contains fields not in the mapping config.
 Should be a noop — no turbopuffer action produced.
 
-### event_update_field_removed
+### event_update_field_removed :white_check_mark:
 Update event where `updateDescription.removedFields` includes a mapped field. Should produce a
 turbopuffer patch with that field explicitly set to null.
 
-### event_delete
+### event_delete :white_check_mark:
 Delete event. Should produce a turbopuffer delete action using the document's `_id`.
 
-### event_delete_mirror_disabled
+### event_delete_mirror_disabled :white_check_mark:
 Delete event on a collection with `mirrorDeletes: false`. Should be skipped — no turbopuffer action.
 
-### event_invalidate
+### event_invalidate :white_check_mark:
 Invalidate event. The mapper should return a stop/fatal signal. The resume token is no longer valid —
 the operator needs to re-backfill.
 
-### event_rename
+### event_rename :white_check_mark:
 Rename event. Should log a warning and return skip — no turbopuffer action.
 
-### event_drop
+### event_drop :white_check_mark:
 Drop event. Should log a warning and return skip — no turbopuffer action.
 
 ## 5. Batching

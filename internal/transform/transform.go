@@ -1,7 +1,11 @@
 package transform
 
 import (
+	"encoding/hex"
 	"fmt"
+	"strconv"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/mongo"
@@ -25,14 +29,41 @@ type Action struct {
 }
 
 // SerializeID converts a BSON _id value to a string for use as a turbopuffer document ID.
+// Supported types: ObjectID, string, int32, int64, Binary with UUID subtype.
+// All other types are rejected.
 func SerializeID(id any) (string, error) {
 	if id == nil {
 		return "", fmt.Errorf("_id is nil")
 	}
 
-	// TODO: handle ObjectId, String, Int32, Int64, Binary UUID
-	// Return error for unsupported types (Decimal128, Array, etc.)
-	return fmt.Sprintf("%v", id), nil
+	switch v := id.(type) {
+	case bson.ObjectID:
+		return v.Hex(), nil
+	case string:
+		return v, nil
+	case int32:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int64:
+		return strconv.FormatInt(v, 10), nil
+	case bson.Binary:
+		if v.Subtype != bson.TypeBinaryUUID {
+			return "", fmt.Errorf("unsupported _id binary subtype: 0x%02x", v.Subtype)
+		}
+		if len(v.Data) != 16 {
+			return "", fmt.Errorf("UUID binary _id has invalid length %d, expected 16", len(v.Data))
+		}
+		return formatUUID(v.Data), nil
+	default:
+		return "", fmt.Errorf("unsupported _id type: %T", id)
+	}
+}
+
+func formatUUID(b []byte) string {
+	return hex.EncodeToString(b[0:4]) + "-" +
+		hex.EncodeToString(b[4:6]) + "-" +
+		hex.EncodeToString(b[6:8]) + "-" +
+		hex.EncodeToString(b[8:10]) + "-" +
+		hex.EncodeToString(b[10:16])
 }
 
 // SerializeClusterTime converts a BSON Timestamp to a uint64 preserving total ordering.
