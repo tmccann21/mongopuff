@@ -175,38 +175,58 @@ Drop event. Should log a warning and return skip — no turbopuffer action.
 
 ## 5. Batching
 
-Unit tests. The system under test is the batch buffer — accepts documents, flushes when a threshold
-is hit. Flush destination should be a fake/mock turbopuffer client (interface) so we can assert
-what gets flushed without a real connection.
+Unit tests. The system under test is the batch buffer — accepts actions, flushes when a threshold
+is hit. Uses a FlushFunc spy to record calls and assert what gets flushed without a real connection.
 
-### batch_flush_on_count
-Push exactly `flush_count` (default 1024) documents into the buffer. Assert that a flush is
-triggered and all 1024 documents are included.
+### batch_flush_on_count :white_check_mark:
+Push exactly `flush_count` actions with unique IDs. Assert that a flush is triggered and all
+actions are included.
 
-### batch_flush_on_size
-Push documents until total serialized bytes exceed `flush_size` (default 8MB). Assert flush fires
-before `flush_count` is reached. The triggering document should be included in the flush.
+### batch_flush_on_size :white_check_mark:
+Set `flush_size` low, `flush_count` high. Push upsert actions with large Attributes until size
+threshold is crossed. Assert flush fires before `flush_count` is reached. The triggering action
+should be included in the flush.
 
-### batch_flush_on_interval
-Push fewer than `flush_count` documents, then advance time past `flush_interval` (default 1s).
-Assert flush fires with whatever is buffered. Use a fake clock or timer channel to control timing
-deterministically.
+### batch_flush_on_interval :white_check_mark:
+Push 1 action (below count and size thresholds) with a short flush interval (50ms).
+Wait for the timer to fire. Assert flush fires with whatever is buffered.
 
-### batch_dedup_same_id
-Push two updates for the same `_id` into the buffer before a flush. Only the most recent update
-should appear in the flushed batch. Batch should contain 1 document, not 2.
+### batch_dedup_same_id :white_check_mark:
+Push two upserts for the same `_id` into the buffer before a flush. Only the most recent update
+should appear in the flushed batch. Batch should contain 1 action, not 2.
 
-### batch_dedup_insert_then_delete
-Push an insert then a delete for the same `_id` before a flush. Only the delete should be sent
+### batch_dedup_insert_then_delete :white_check_mark:
+Push an upsert then a delete for the same `_id` before a flush. Only the delete should be sent
 in the flushed batch.
 
-### batch_empty_no_flush
-No documents in the buffer, timer fires. No flush should occur — the fake tpuf client should
+### batch_empty_no_flush :white_check_mark:
+Create batcher, call Flush() immediately. No flush should occur — the FlushFunc spy should
 receive zero calls.
 
-### batch_partial_failure
-Push 10 documents. Fake tpuf client rejects 2 of them (write_rejected). The 2 failures should be
-written to DLQ. The remaining 8 should succeed. The batch is not retried as a whole.
+### batch_skip_action_ignored :white_check_mark:
+Set `flush_size` to 100. Push an ActionSkip with large attrs (~80 bytes), then a real upsert
+(~60 bytes). Assert no flush fires (skip's bytes were not accumulated — total is ~60, not ~140).
+Flush manually and assert the batch contains only the upsert.
+
+### batch_preserves_insertion_order :white_check_mark:
+Push actions for IDs "c", "a", "b". Flush manually. Assert flushed batch order is ["c", "a", "b"].
+
+### batch_resume_token_tracks_latest :white_check_mark:
+Push 3 actions with different resume tokens. Flush manually. Assert the FlushFunc received the
+third event's token.
+
+### batch_flush_error_propagated :white_check_mark:
+Set FlushFunc to return an error. Set `flush_count=1`. Call Add with 1 action. Assert Add
+returns the FlushFunc's error.
+
+### batch_reusable_after_flush :white_check_mark:
+Set `flush_count=2`. Push 2 actions (triggers auto flush), then push 1 more and call Flush().
+Assert FlushFunc was called twice — first with 2 actions, second with 1.
+
+### batch_dedup_size_overcounts :white_check_mark:
+Set `flush_size=150`. Push the same ID three times (~60 bytes each). The size accumulator
+hits ~180 even though the logical batch is 1 deduped action of ~60 bytes. Assert flush fires.
+Documents current over-counting behavior (safe — just flushes sooner).
 
 ## 6. Error Handling & Retry
 
