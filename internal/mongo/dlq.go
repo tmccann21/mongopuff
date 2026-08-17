@@ -1,7 +1,25 @@
 package mongo
 
-// This file will contain the real DLQ writer implementation
-// that satisfies the DLQWriter interface.
-//
-// Implementation will use the official MongoDB Go driver to:
-// - Insert DLQEntry documents into the _mongopuff_dlq collection
+import (
+	"context"
+	"fmt"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
+)
+
+const mongopuffDLQCollection = "_mongopuff_dlq"
+
+type dlqWriter struct {
+	coll *mongo.Collection
+}
+
+func (s *Store) NewDLQWriter() DLQWriter {
+	return &dlqWriter{coll: s.db.Collection(mongopuffDLQCollection)}
+}
+
+func (d *dlqWriter) Write(ctx context.Context, entry DLQEntry) error {
+	if _, err := d.coll.InsertOne(ctx, entry); err != nil {
+		return fmt.Errorf("writing to DLQ: %w", err)
+	}
+	return nil
+}

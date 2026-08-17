@@ -43,13 +43,15 @@ func runCDC() error {
 		}
 	}()
 
+	dlqWriter := store.NewDLQWriter()
+
 	// Spawn a goroutine per collection.
 	var wg sync.WaitGroup
 	for _, coll := range cfg.Collections {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runCollectionCDC(ctx, cfg, store, coll, status); err != nil {
+			if err := runCollectionCDC(ctx, cfg, store, dlqWriter, coll, status); err != nil {
 				slog.Error("collection CDC stopped", "collection", coll.Name, "error", err)
 			}
 		}()
@@ -60,7 +62,7 @@ func runCDC() error {
 	return nil
 }
 
-func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, coll config.CollectionConfig, status *health.Status) error {
+func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
 	slog.Info("starting CDC", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
 
 	state, err := store.LoadCollectionState(ctx, coll.Name)
@@ -75,7 +77,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	defer stream.Close(ctx)
 
 	// Create batcher with flush function.
-	// TODO: wire real turbopuffer client and DLQ writer
+	// TODO: wire real turbopuffer client
 	namespace := coll.Mapping.Namespace
 	batcher := batch.New(ctx, namespace, cfg.Global, func(
 		ctx context.Context, ns string, actions []transform.Action, resumeToken []byte,
