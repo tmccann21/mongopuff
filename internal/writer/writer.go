@@ -2,7 +2,6 @@ package writer
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -10,40 +9,22 @@ import (
 	"github.com/tmccann21/mongopuff/internal/transform"
 )
 
-var defaultBackoff = []time.Duration{
-	500 * time.Millisecond,
-	1 * time.Second,
-	2 * time.Second,
-	4 * time.Second,
-	8 * time.Second,
-	16 * time.Second,
-	32 * time.Second,
-}
-
 type TurbopufferClient interface {
 	Upsert(ctx context.Context, namespace string, actions []transform.Action) error
 	Delete(ctx context.Context, namespace string, ids []string) error
 }
 
 type Writer struct {
-	tpuf    TurbopufferClient
-	dlq     mongo.DLQWriter
-	backoff []time.Duration
+	tpuf TurbopufferClient
+	dlq  mongo.DLQWriter
 }
 
 // New creates a Writer.
 func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 	return &Writer{
-		tpuf:    tpuf,
-		dlq:     dlq,
-		backoff: defaultBackoff,
+		tpuf: tpuf,
+		dlq:  dlq,
 	}
-}
-
-// WithBackoff overrides the default backoff schedule (useful for tests).
-func (w *Writer) WithBackoff(backoff []time.Duration) *Writer {
-	w.backoff = backoff
-	return w
 }
 
 // WriteBatch writes a batch of actions to turbopuffer. On retryable failures it retries
@@ -61,9 +42,7 @@ func (w *Writer) WriteBatch(ctx context.Context, namespace string, actions []tra
 	}
 
 	if len(upserts) > 0 {
-		if err := w.retryWithBackoff(ctx, func() error {
-			return w.tpuf.Upsert(ctx, namespace, upserts)
-		}); err != nil {
+		if err := w.tpuf.Upsert(ctx, namespace, upserts); err != nil {
 			w.sendToDLQ(ctx, namespace, upserts, err)
 		}
 	}
@@ -73,40 +52,10 @@ func (w *Writer) WriteBatch(ctx context.Context, namespace string, actions []tra
 		for i, d := range deletes {
 			ids[i] = d.DocumentID
 		}
-		if err := w.retryWithBackoff(ctx, func() error {
-			return w.tpuf.Delete(ctx, namespace, ids)
-		}); err != nil {
+		if err := w.tpuf.Delete(ctx, namespace, ids); err != nil {
 			w.sendToDLQ(ctx, namespace, deletes, err)
 		}
 	}
-}
-
-func (w *Writer) retryWithBackoff(ctx context.Context, op func() error) error {
-	for attempt := 0; attempt <= len(w.backoff); attempt++ {
-		err := op()
-		if err == nil {
-			return nil
-		}
-
-		if attempt == len(w.backoff) {
-			return fmt.Errorf("exhausted retries: %w", err)
-		}
-
-		slog.Warn("turbopuffer write failed, retrying",
-			"attempt", attempt+1,
-			"backoffMs", w.backoff[attempt].Milliseconds(),
-			"error", err,
-		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(w.backoff[attempt]):
-		}
-	}
-
-	// unreachable
-	return nil
 }
 
 func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []transform.Action, writeErr error) {

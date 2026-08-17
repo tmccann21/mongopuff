@@ -148,12 +148,11 @@ Error types with corresponding action
 type_mismatch - log + skip
 id_missing - log + skip
 write_rejected - DLQ
-network_error - retry with backoff; DLQ on exhaustion
-rate_limited - 429 from tpuff; retry with backoff; DLQ on exhaustion
-server_error - 500 from tpuff; retry with backoff; DLQ on exhaustion
+network_error - DLQ
+rate_limited - 429 from tpuff; DLQ
+server_error - 500 from tpuff; DLQ
 
-retry should use exponential backoff according to the following pattern [0.5s, 1s, 2s, 4s, 8s, 16s, 32s]
-after backoff is exhausted, write to DLQ
+retry is handled by the turbopuffer Go SDK's built-in retry mechanism (exponential backoff, retries on 408/429/5xx/connection errors). mongopuff does not implement its own retry logic. When the SDK exhausts retries and returns an error, the failing documents are written to the DLQ.
 
 ## Backfill Mode
 Scan a collection and mirror all matching documents to turbopuffer; resumable and progress-reporting. Page size is determined by the collection config document (default is 128)
