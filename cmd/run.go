@@ -13,6 +13,8 @@ import (
 	"github.com/tmccann21/mongopuff/internal/batch"
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/health"
+	"github.com/tmccann21/mongopuff/internal/writer"
+	"github.com/tmccann21/mongopuff/internal/turbopuffer"
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
 )
@@ -44,6 +46,7 @@ func runCDC() error {
 	}()
 
 	dlqWriter := store.NewDLQWriter()
+	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, "aws-us-west-2"), dlqWriter)
 
 	// Spawn a goroutine per collection.
 	var wg sync.WaitGroup
@@ -51,7 +54,7 @@ func runCDC() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runCollectionCDC(ctx, cfg, store, dlqWriter, coll, status); err != nil {
+			if err := runCollectionCDC(ctx, cfg, store, w, dlqWriter, coll, status); err != nil {
 				slog.Error("collection CDC stopped", "collection", coll.Name, "error", err)
 			}
 		}()
@@ -62,7 +65,7 @@ func runCDC() error {
 	return nil
 }
 
-func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
+func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
 	slog.Info("starting CDC", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
 
 	state, err := store.LoadCollectionState(ctx, coll.Name)
@@ -76,8 +79,6 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	}
 	defer stream.Close(ctx)
 
-	// Create batcher with flush function.
-	// TODO: wire real turbopuffer client
 	namespace := coll.Mapping.Namespace
 	batcher := batch.New(ctx, namespace, cfg.Global, func(
 		ctx context.Context, ns string, actions []transform.Action, resumeToken []byte,
@@ -92,6 +93,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 				"documentId", a.DocumentID,
 			)
 		}
+		w.WriteBatch(ctx, ns, actions)
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)

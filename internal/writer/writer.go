@@ -7,6 +7,7 @@ import (
 
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
+	"github.com/tmccann21/mongopuff/internal/turbopuffer"
 )
 
 type TurbopufferClient interface {
@@ -44,7 +45,7 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 			Collection:   namespace,
 			DocumentID:   a.DocumentID,
 			Operation:    operationFromAction(a.Type),
-			ErrorKind:    mongo.ErrNetworkError, // TODO: classify from writeErr
+			ErrorKind:    turbopuffer.ClassifyError(writeErr),
 			ErrorMessage: writeErr.Error(),
 			ClusterTime:  a.ClusterTime,
 			CreatedAt:    time.Now(),

@@ -2,7 +2,10 @@ package turbopuffer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
+	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
 	"github.com/turbopuffer/turbopuffer-go/v2"
 	"github.com/turbopuffer/turbopuffer-go/v2/option"
@@ -63,5 +66,24 @@ func (c *Client) Write(ctx context.Context, namespace string, actions []transfor
 		PatchCondition:  condition,
 		Deletes:         deletes,
 	})
-	return err
+
+	if err != nil {
+		return fmt.Errorf("failed to write to turbopuffer: %w", err)
+	}
+	return nil
+}
+
+func ClassifyError(err error) mongo.ErrorKind {
+	var apierr *turbopuffer.Error
+	if errors.As(err, &apierr) {
+		switch {
+		case apierr.StatusCode == 429:
+			return mongo.ErrRateLimited
+		case apierr.StatusCode >= 500:
+			return mongo.ErrServerError
+		default:
+			return mongo.ErrWriteRejected
+		}
+	}
+	return mongo.ErrNetworkError
 }

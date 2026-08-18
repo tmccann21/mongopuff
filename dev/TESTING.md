@@ -230,36 +230,32 @@ Documents current over-counting behavior (safe — just flushes sooner).
 
 ## 6. Error Handling & Retry
 
-Unit tests. The system under test is the error handler / retry loop. Use a fake tpuf client to
-control responses and a fake clock or shortened backoff schedule (e.g. all intervals set to 0.1s)
-to keep tests fast. The backoff durations themselves are not under test — just the behavior
-(retry vs skip vs DLQ).
+Unit tests. The system under test is the writer and error classifier. Use a fake tpuf client to
+control responses and a fake DLQ writer to capture entries. Retry is handled by the turbopuffer
+SDK internally — these tests only verify that on SDK failure, actions are correctly routed to
+the DLQ with the appropriate error kind.
 
 ### error_type_mismatch_skip
-Document has a type mismatch. Should log and skip. No DLQ write, no retry, no call to tpuf.
+Document has a type mismatch. Should log and skip. No DLQ write, no call to tpuf.
 
 ### error_id_missing_skip
-Document has no `_id`. Should log and skip. No DLQ write, no retry, no call to tpuf.
+Document has no `_id`. Should log and skip. No DLQ write, no call to tpuf.
 
-### error_write_rejected_dlq
-Fake tpuf client returns write_rejected. Should go straight to DLQ with no retry.
+### error_write_success_no_dlq
+Fake tpuf client succeeds. Assert no DLQ entries were written.
 
-### error_network_retry_then_succeed
-Fake tpuf client returns network_error on first call, succeeds on second. Assert
-exactly 2 calls were made and no DLQ write occurred.
+### error_write_failure_dlq
+Fake tpuf client returns an error. Assert all actions in the batch are written to DLQ.
 
-### error_network_retry_exhaust_to_dlq
-Fake tpuf client returns network_error on every call. Use shortened backoff schedule
-(all intervals ~0.1s). After all retry attempts are exhausted, assert the document is
-written to DLQ with error kind `network_error`.
+### error_classify_rate_limited
+Fake tpuf client returns a 429 error. Assert DLQ entry has error kind `rate_limited`.
 
-### error_rate_limited_retry_exhaust_to_dlq
-Same as above but fake tpuf returns 429. After retries exhausted, DLQ entry should have
-error kind `rate_limited`.
+### error_classify_server_error
+Fake tpuf client returns a 500 error. Assert DLQ entry has error kind `server_error`.
 
-### error_server_error_retry_exhaust_to_dlq
-Same as above but fake tpuf returns 500. After retries exhausted, DLQ entry should have
-error kind `server_error`.
+### error_classify_network_error
+Fake tpuf client returns a non-HTTP error (e.g. connection refused). Assert DLQ entry
+has error kind `network_error`.
 
 ## 7. Backfill
 
