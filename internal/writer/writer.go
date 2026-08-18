@@ -10,8 +10,7 @@ import (
 )
 
 type TurbopufferClient interface {
-	Upsert(ctx context.Context, namespace string, actions []transform.Action) error
-	Delete(ctx context.Context, namespace string, ids []string) error
+	Write(ctx context.Context, namespace string, actions []transform.Action) error
 }
 
 type Writer struct {
@@ -27,34 +26,15 @@ func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 	}
 }
 
-// WriteBatch writes a batch of actions to turbopuffer. On retryable failures it retries
-// with exponential backoff. On exhaustion or non-retryable errors, it writes to the DLQ.
+// WriteBatch writes a batch of actions to turbopuffer in a single API call.
+// On failure, writes all actions to the DLQ.
 func (w *Writer) WriteBatch(ctx context.Context, namespace string, actions []transform.Action) {
-	var upserts []transform.Action
-	var deletes []transform.Action
-	for _, a := range actions {
-		switch a.Type {
-		case transform.ActionUpsert, transform.ActionPatch:
-			upserts = append(upserts, a)
-		case transform.ActionDelete:
-			deletes = append(deletes, a)
-		}
+	if len(actions) == 0 {
+		return
 	}
 
-	if len(upserts) > 0 {
-		if err := w.tpuf.Upsert(ctx, namespace, upserts); err != nil {
-			w.sendToDLQ(ctx, namespace, upserts, err)
-		}
-	}
-
-	if len(deletes) > 0 {
-		ids := make([]string, len(deletes))
-		for i, d := range deletes {
-			ids[i] = d.DocumentID
-		}
-		if err := w.tpuf.Delete(ctx, namespace, ids); err != nil {
-			w.sendToDLQ(ctx, namespace, deletes, err)
-		}
+	if err := w.tpuf.Write(ctx, namespace, actions); err != nil {
+		w.sendToDLQ(ctx, namespace, actions, err)
 	}
 }
 
