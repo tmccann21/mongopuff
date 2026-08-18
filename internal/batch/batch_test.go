@@ -20,17 +20,15 @@ type flushSpy struct {
 }
 
 type flushCall struct {
-	namespace   string
 	actions     []transform.Action
 	resumeToken []byte
 }
 
 func (s *flushSpy) fn() FlushFunc {
-	return func(ctx context.Context, namespace string, actions []transform.Action, resumeToken []byte) error {
+	return func(ctx context.Context, actions []transform.Action, resumeToken []byte) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.calls = append(s.calls, flushCall{
-			namespace:   namespace,
 			actions:     actions,
 			resumeToken: resumeToken,
 		})
@@ -95,7 +93,7 @@ func paddedUpsert(id string, targetBytes int) transform.Action {
 func TestBatchFlushOnCount(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(3, 999999, 60000) // high size/time so only count triggers
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	for i := range 3 {
 		if err := b.Add(smallUpsert(fmt.Sprintf("id-%d", i)), []byte("tok")); err != nil {
@@ -115,7 +113,7 @@ func TestBatchFlushOnSize(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 200, 60000) // low size threshold, high count/time
 
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	// Each paddedUpsert(~120 bytes). Two should exceed 200.
 	if err := b.Add(paddedUpsert("a", 120), []byte("t1")); err != nil {
@@ -147,7 +145,7 @@ func TestBatchFlushOnInterval(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 50) // 50ms interval
 
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	if err := b.Add(smallUpsert("a"), []byte("tok")); err != nil {
 		t.Fatal(err)
@@ -167,7 +165,7 @@ func TestBatchFlushOnInterval(t *testing.T) {
 func TestBatchDedupSameID(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	if err := b.Add(upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
 		t.Fatal(err)
@@ -194,7 +192,7 @@ func TestBatchDedupSameID(t *testing.T) {
 func TestBatchDedupInsertThenDelete(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	if err := b.Add(upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
 		t.Fatal(err)
@@ -218,7 +216,7 @@ func TestBatchDedupInsertThenDelete(t *testing.T) {
 func TestBatchEmptyNoFlush(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	if err := b.Flush(); err != nil {
 		t.Fatal(err)
@@ -232,7 +230,7 @@ func TestBatchSkipActionIgnored(t *testing.T) {
 	spy := &flushSpy{}
 	// Low size threshold: if skip's bytes leak in, adding the upsert will trigger a flush.
 	cfg := testConfig(9999, 100, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	skip := transform.Action{
 		Type:       transform.ActionSkip,
@@ -269,7 +267,7 @@ func TestBatchSkipActionIgnored(t *testing.T) {
 func TestBatchPreservesInsertionOrder(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	for _, id := range []string{"c", "a", "b"} {
 		if err := b.Add(smallUpsert(id), []byte("tok")); err != nil {
@@ -295,7 +293,7 @@ func TestBatchPreservesInsertionOrder(t *testing.T) {
 func TestBatchResumeTokenTracksLatest(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 999999, 60000)
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	for i := range 3 {
 		tok := []byte(fmt.Sprintf("token-%d", i))
@@ -318,7 +316,7 @@ func TestBatchFlushErrorPropagated(t *testing.T) {
 	spy := &flushSpy{err: flushErr}
 	cfg := testConfig(1, 999999, 60000) // flush on every add
 
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	err := b.Add(smallUpsert("a"), []byte("tok"))
 	if !errors.Is(err, flushErr) {
@@ -330,7 +328,7 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(2, 999999, 60000) // flush every 2
 
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	// First batch: 2 actions → auto flush.
 	for i := range 2 {
@@ -367,7 +365,7 @@ func TestBatchDedupSizeOvercounts(t *testing.T) {
 	// but the accumulator hits ~180, exceeding the threshold.
 	cfg := testConfig(9999, 150, 60000)
 
-	b := New(context.Background(), "ns", cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
 
 	for i := range 3 {
 		if err := b.Add(paddedUpsert("same-id", 60), []byte(fmt.Sprintf("t%d", i))); err != nil {

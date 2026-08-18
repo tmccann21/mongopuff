@@ -13,7 +13,7 @@ import (
 // FlushFunc is called when a batch is ready to be written. resumeToken is the
 // token of the last event in the batch, to be persisted after a successful write.
 // Partial failure handling (retry, DLQ) is the responsibility of the implementation.
-type FlushFunc func(ctx context.Context, namespace string, actions []transform.Action, resumeToken []byte) error
+type FlushFunc func(ctx context.Context, actions []transform.Action, resumeToken []byte) error
 
 // pendingFlush holds a batch ready to be written, extracted under the lock.
 type pendingFlush struct {
@@ -24,10 +24,9 @@ type pendingFlush struct {
 // Batcher accumulates CDC actions and flushes when count, size, or time thresholds are hit.
 // Backfill does not use the batcher — pages are written directly by the backfill loop.
 type Batcher struct {
-	ctx       context.Context
-	namespace string
-	config    config.GlobalConfig
-	flushFn   FlushFunc
+	ctx     context.Context
+	config  config.GlobalConfig
+	flushFn FlushFunc
 
 	mu          sync.Mutex
 	actions     map[string]transform.Action // keyed by DocumentID for dedup
@@ -37,13 +36,12 @@ type Batcher struct {
 	resumeToken []byte // token of the most recent event added
 }
 
-func New(ctx context.Context, namespace string, cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
+func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
 	return &Batcher{
-		ctx:       ctx,
-		namespace: namespace,
-		config:    cfg,
-		flushFn:   flushFn,
-		actions:   make(map[string]transform.Action),
+		ctx:     ctx,
+		config:  cfg,
+		flushFn: flushFn,
+		actions: make(map[string]transform.Action),
 	}
 }
 
@@ -80,7 +78,7 @@ func (b *Batcher) Add(action transform.Action, resumeToken []byte) error {
 	b.mu.Unlock()
 
 	if pending != nil {
-		return b.flushFn(b.ctx, b.namespace, pending.actions, pending.resumeToken)
+		return b.flushFn(b.ctx, pending.actions, pending.resumeToken)
 	}
 	return nil
 }
@@ -94,7 +92,7 @@ func (b *Batcher) Flush() error {
 	if pending == nil {
 		return nil
 	}
-	return b.flushFn(b.ctx, b.namespace, pending.actions, pending.resumeToken)
+	return b.flushFn(b.ctx, pending.actions, pending.resumeToken)
 }
 
 // drainLocked extracts the current batch and resets internal state.

@@ -80,20 +80,14 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	defer stream.Close(ctx)
 
 	namespace := coll.Mapping.Namespace
-	batcher := batch.New(ctx, namespace, cfg.Global, func(
-		ctx context.Context, ns string, actions []transform.Action, resumeToken []byte,
+	batcher := batch.New(ctx, cfg.Global, func(
+		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		slog.Info("flush",
-			"namespace", ns,
+			"namespace", namespace,
 			"actions", len(actions),
 		)
-		for _, a := range actions {
-			slog.Info("  action",
-				"type", a.Type,
-				"documentId", a.DocumentID,
-			)
-		}
-		w.WriteBatch(ctx, ns, actions)
+		w.WriteBatch(ctx, namespace, actions)
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
