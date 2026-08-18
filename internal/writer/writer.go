@@ -40,12 +40,20 @@ func (w *Writer) WriteBatch(ctx context.Context, namespace string, actions []tra
 }
 
 func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []transform.Action, writeErr error) {
+	errKind := turbopuffer.ClassifyError(writeErr)
+	slog.Error("turbopuffer write failed, sending to DLQ",
+		"namespace", namespace,
+		"actions", len(actions),
+		"errorKind", errKind,
+		"error", writeErr,
+	)
+
 	for _, a := range actions {
 		entry := mongo.DLQEntry{
 			Collection:   namespace,
 			DocumentID:   a.DocumentID,
 			Operation:    operationFromAction(a.Type),
-			ErrorKind:    turbopuffer.ClassifyError(writeErr),
+			ErrorKind:    errKind,
 			ErrorMessage: writeErr.Error(),
 			ClusterTime:  a.ClusterTime,
 			CreatedAt:    time.Now(),

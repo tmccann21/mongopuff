@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
@@ -54,22 +55,40 @@ func (c *Client) Write(ctx context.Context, namespace string, actions []transfor
 		}
 	}
 
-	condition := turbopuffer.NewFilterLt(
-		"_clusterTime",
-		map[string]string{"$ref_new": "_clusterTime"},
-	)
+	params := turbopuffer.NamespaceWriteParams{}
 
-	_, err := ns.Write(ctx, turbopuffer.NamespaceWriteParams{
-		UpsertRows:      upsertRows,
-		UpsertCondition: condition,
-		PatchRows:       patchRows,
-		PatchCondition:  condition,
-		Deletes:         deletes,
-	})
+	if len(upsertRows) > 0 {
+		params.UpsertRows = upsertRows
+		params.UpsertCondition = turbopuffer.NewFilterLt(
+			"_clusterTime",
+			map[string]string{"$ref_new": "_clusterTime"},
+		)
+	}
+
+	if len(patchRows) > 0 {
+		params.PatchRows = patchRows
+		params.PatchCondition = turbopuffer.NewFilterLt(
+			"_clusterTime",
+			map[string]string{"$ref_new": "_clusterTime"},
+		)
+	}
+
+	if len(deletes) > 0 {
+		params.Deletes = deletes
+	}
+
+	_, err := ns.Write(ctx, params)
 
 	if err != nil {
 		return fmt.Errorf("failed to write to turbopuffer: %w", err)
 	}
+
+	slog.Info("turbopuffer write success",
+		"namespace", namespace,
+		"upserts", len(upsertRows),
+		"patches", len(patchRows),
+		"deletes", len(deletes),
+	)
 	return nil
 }
 
