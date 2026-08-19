@@ -1,9 +1,38 @@
 package mongo
 
-// This file will contain the real MongoDB backfill scanner implementation
-// that satisfies the BackfillScanner interface.
-//
-// Implementation will use the official MongoDB Go driver to:
-// - Issue db.runCommand({ping:1}) and capture operationTime
-// - Query documents with _id > cursor, sorted by _id, limited by page size
-// - Return raw documents for transformation
+import (
+	"context"
+	"fmt"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+)
+
+type CollectionScanner struct {
+	c *mongo.Collection
+}
+
+func (cs *CollectionScanner) ScanPage(ctx context.Context, afterID any, pageSize int) ([]map[string]any, error) {
+	filter := bson.M{}
+	if afterID != nil {
+		filter = bson.M{"_id": bson.M{"$gt": afterID}}
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: 1}}).
+		SetLimit(int64(pageSize))
+
+	cursor, err := cs.c.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("scanning page: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var docs []map[string]any
+	err = cursor.All(ctx, &docs)
+	if err != nil {
+		return nil, fmt.Errorf("decoding page: %w", err)
+	}
+	return docs, nil
+}

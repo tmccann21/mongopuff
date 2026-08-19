@@ -140,3 +140,7 @@ func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
 
 	return uint64(ts.T)<<32 | uint64(ts.I), nil
 }
+
+func (s *Store) CollectionScanner(name string) *CollectionScanner {
+	return &CollectionScanner{c: s.db.Collection(name)}
+}

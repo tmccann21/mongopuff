@@ -36,13 +36,33 @@ func runBackfill() error {
 	}
 
 	slog.Info("starting backfill", "collection", collCfg.Name)
+	scanner := store.CollectionScanner(collCfg.Name)
 
-	opTime, err := store.PingOperationTime(ctx)
-	if err != nil {
-		return fmt.Errorf("ping operation time: %w", err)
+	var lastID any
+	for {
+		opTime, err := store.PingOperationTime(ctx)
+		if err != nil {
+			return fmt.Errorf("ping operation time: %w", err)
+		}
+
+		slog.Info("got operation time", "collection", collCfg.Name, "operationTime", opTime)
+
+		docs, err := scanner.ScanPage(ctx, lastID, collCfg.EffectiveBackfillPageSize())
+		if err != nil {
+			return fmt.Errorf("scan page: %w", err)
+		}
+
+		if len(docs) == 0 {
+			slog.Info("no more docs", "collection", collCfg.Name, "lastID", lastID)
+			break
+		}
+
+		slog.Info("scanned page", "collection", collCfg.Name, "docs", len(docs))
+
+		lastID = docs[len(docs)-1]["_id"]
+		slog.Info("last id", "collection", collCfg.Name, "id", lastID)
+
 	}
-
-	slog.Info("got operation time", "collection", collCfg.Name, "operationTime", opTime)
 
 	return nil
 }
