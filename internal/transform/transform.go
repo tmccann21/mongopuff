@@ -91,6 +91,25 @@ func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) (Acti
 	}
 }
 
+func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionConfig) (Action, error) {
+	docID, err := SerializeID(doc["_id"])
+	if err != nil {
+		return Action{}, err
+	}
+
+	attrs, err := extractFields(doc, coll.Mapping.Fields)
+	if err != nil {
+		return Action{}, err
+	}
+
+	return Action{
+		Type:        ActionUpsert,
+		DocumentID:  docID,
+		Attributes:  attrs,
+		ClusterTime: clusterTime,
+	}, nil
+}
+
 func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
