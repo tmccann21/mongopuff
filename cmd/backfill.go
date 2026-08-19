@@ -25,7 +25,7 @@ func runBackfill() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, _, err := loadConfig(ctx)
+	cfg, store, err := loadConfig(ctx)
 	if err != nil {
 		return err
 	}
@@ -37,7 +37,12 @@ func runBackfill() error {
 
 	slog.Info("starting backfill", "collection", collCfg.Name)
 
-	// TODO: wire up backfill loop: ping → scan page → upsert → advance cursor
+	opTime, err := store.PingOperationTime(ctx)
+	if err != nil {
+		return fmt.Errorf("ping operation time: %w", err)
+	}
+
+	slog.Info("got operation time", "collection", collCfg.Name, "operationTime", opTime)
 
 	return nil
 }

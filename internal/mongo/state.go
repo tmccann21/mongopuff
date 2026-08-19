@@ -125,3 +125,18 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte) (*LiveChangeStream, error) {
 	return OpenChangeStream(ctx, s.db, collection, resumeToken)
 }
+
+func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
+	var result bson.M
+	err := s.db.RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Decode(&result)
+	if err != nil {
+		return 0, fmt.Errorf("ping: %w", err)
+	}
+
+	ts, ok := result["operationTime"].(bson.Timestamp)
+	if !ok {
+		return 0, fmt.Errorf("operationTime not found or unexpected type in ping response")
+	}
+
+	return uint64(ts.T)<<32 | uint64(ts.I), nil
+}
