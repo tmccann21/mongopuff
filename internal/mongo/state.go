@@ -144,3 +144,10 @@ func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
 func (s *Store) CollectionScanner(name string) *CollectionScanner {
 	return &CollectionScanner{c: s.db.Collection(name)}
 }
+
+func (s *Store) SaveBackfillCursor(ctx context.Context, collection string, lastID any) error {
+	coll := s.db.Collection(mongopuffStateCollection)
+	_, err := coll.UpdateOne(ctx, bson.M{"_id": collection}, bson.M{"$set": bson.M{"backfillCursor": lastID}}, options.UpdateOne().SetUpsert(true))
+
+	return err
+}

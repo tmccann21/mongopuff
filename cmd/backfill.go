@@ -9,6 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/tmccann21/mongopuff/internal/writer"
+	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	"github.com/tmccann21/mongopuff/internal/transform"
 )
 
 func runBackfill() error {
@@ -35,10 +39,16 @@ func runBackfill() error {
 		return fmt.Errorf("collection %q not found in _mongopuff config", *collection)
 	}
 
+	dlqWriter := store.NewDLQWriter()
+	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, "aws-us-west-2"), dlqWriter)
+
 	slog.Info("starting backfill", "collection", collCfg.Name)
 	scanner := store.CollectionScanner(collCfg.Name)
-
-	var lastID any
+	state, err := store.LoadCollectionState(ctx, collCfg.Name)
+	if err != nil {
+		return err
+	}
+	lastID := state.BackfillCursor
 	for {
 		opTime, err := store.PingOperationTime(ctx)
 		if err != nil {
@@ -58,10 +68,22 @@ func runBackfill() error {
 		}
 
 		slog.Info("scanned page", "collection", collCfg.Name, "docs", len(docs))
+		actions := make([]transform.Action, 0, len(docs))
+		for _, doc := range docs {
+			action, err := transform.MapDocument(doc, opTime, collCfg)
+			if err != nil {
+				return fmt.Errorf("map document: %w", err)
+			}
+			actions = append(actions, action)
+		}
 
+		w.WriteBatch(ctx, collCfg.Mapping.Namespace, actions)
 		lastID = docs[len(docs)-1]["_id"]
-		slog.Info("last id", "collection", collCfg.Name, "id", lastID)
 
+		if err := store.SaveBackfillCursor(ctx, collCfg.Name, lastID); err != nil {
+			return fmt.Errorf("saving backfill cursor: %w", err)
+		}
+		slog.Info("last id", "collection", collCfg.Name, "id", lastID)
 	}
 
 	return nil
