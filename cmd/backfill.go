@@ -42,6 +42,8 @@ func runBackfill() error {
 	dlqWriter := store.NewDLQWriter()
 	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, "aws-us-west-2"), dlqWriter)
 
+	schema := turbopuffer.BuildSchema(collCfg.Mapping.Fields)
+
 	slog.Info("starting backfill", "collection", collCfg.Name)
 	scanner := store.CollectionScanner(collCfg.Name)
 	state, err := store.LoadCollectionState(ctx, collCfg.Name)
@@ -77,7 +79,7 @@ func runBackfill() error {
 			actions = append(actions, action)
 		}
 
-		w.WriteBatch(ctx, collCfg.Mapping.Namespace, actions)
+		w.WriteBatch(ctx, collCfg.Mapping.Namespace, schema, actions)
 		lastID = docs[len(docs)-1]["_id"]
 
 		if err := store.SaveBackfillCursor(ctx, collCfg.Name, lastID); err != nil {

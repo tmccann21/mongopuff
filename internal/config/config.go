@@ -42,6 +42,7 @@ type FieldMapping struct {
 	Type      FieldType       `bson:"type"`
 	Dimension int             `bson:"dimension,omitempty"` // vector only
 	Precision VectorPrecision `bson:"precision,omitempty"` // vector only
+	Filterable *bool           `bson:"filterable,omitempty"`
 }
 
 type MappingConfig struct {

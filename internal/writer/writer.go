@@ -8,10 +8,11 @@ import (
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
 	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	tpuf "github.com/turbopuffer/turbopuffer-go/v2"
 )
 
 type TurbopufferClient interface {
-	Write(ctx context.Context, namespace string, actions []transform.Action) error
+	Write(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error
 }
 
 type Writer struct {
@@ -29,12 +30,12 @@ func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 
 // WriteBatch writes a batch of actions to turbopuffer in a single API call.
 // On failure, writes all actions to the DLQ.
-func (w *Writer) WriteBatch(ctx context.Context, namespace string, actions []transform.Action) {
+func (w *Writer) WriteBatch(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) {
 	if len(actions) == 0 {
 		return
 	}
 
-	if err := w.tpuf.Write(ctx, namespace, actions); err != nil {
+	if err := w.tpuf.Write(ctx, namespace, schema, actions); err != nil {
 		w.sendToDLQ(ctx, namespace, actions, err)
 	}
 }

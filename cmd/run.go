@@ -80,6 +80,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	defer stream.Close(ctx)
 
 	namespace := coll.Mapping.Namespace
+	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
 	batcher := batch.New(ctx, cfg.Global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
@@ -87,7 +88,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 			"namespace", namespace,
 			"actions", len(actions),
 		)
-		w.WriteBatch(ctx, namespace, actions)
+		w.WriteBatch(ctx, namespace, schema, actions)
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)

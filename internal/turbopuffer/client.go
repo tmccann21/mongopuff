@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
 	"github.com/turbopuffer/turbopuffer-go/v2"
 	"github.com/turbopuffer/turbopuffer-go/v2/option"
+	"github.com/turbopuffer/turbopuffer-go/v2/packages/param"
 )
 
 type Client struct {
@@ -25,6 +27,20 @@ func New(apiKey string, region string) *Client {
 	}
 }
 
+func BuildSchema(fields []config.FieldMapping) map[string]turbopuffer.AttributeSchemaConfigParam {
+	schema := make(map[string]turbopuffer.AttributeSchemaConfigParam, len(fields))
+	for _, field := range fields {
+		entry := turbopuffer.AttributeSchemaConfigParam{
+			Type: turbopuffer.AttributeType(field.Type),
+		}
+		if field.Filterable != nil {
+			entry.Filterable = param.NewOpt(*field.Filterable)
+		}
+		schema[field.Name] = entry
+	}
+	return schema
+}
+
 func toRow(a transform.Action) turbopuffer.RowParam {
 	row := turbopuffer.RowParam{
 		"id":           a.DocumentID,
@@ -37,7 +53,7 @@ func toRow(a transform.Action) turbopuffer.RowParam {
 	return row
 }
 
-func (c *Client) Write(ctx context.Context, namespace string, actions []transform.Action) error {
+func (c *Client) Write(ctx context.Context, namespace string, schema map[string]turbopuffer.AttributeSchemaConfigParam, actions []transform.Action) error {
 	ns := c.client.Namespace(namespace)
 
 	var upsertRows []turbopuffer.RowParam
@@ -55,7 +71,9 @@ func (c *Client) Write(ctx context.Context, namespace string, actions []transfor
 		}
 	}
 
-	params := turbopuffer.NamespaceWriteParams{}
+	params := turbopuffer.NamespaceWriteParams{
+		Schema: schema,
+	}
 
 	if len(upsertRows) > 0 {
 		params.UpsertRows = upsertRows
