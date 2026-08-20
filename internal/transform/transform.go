@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -196,13 +197,7 @@ func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string
 	return attrs, nil
 }
 
-// coerceValue converts a BSON value to the expected type per the field mapping.
-// Numeric coercion rules:
-//   - float: int32/int64 → float64
-//   - int: int32 → int64, float64 → int64 (if no fractional part)
-//   - uint: int32/int64 → uint64 (reject negatives), float64 → uint64 (if no fractional part, non-negative)
-//
-// Array variants apply the same rules per element.
+// coerceValue converts and validates a BSON value per the field mapping.
 // nil (BSON null) passes through for all types.
 func coerceValue(val any, f config.FieldMapping) (any, error) {
 	if val == nil {
@@ -210,20 +205,38 @@ func coerceValue(val any, f config.FieldMapping) (any, error) {
 	}
 
 	switch f.Type {
+	case config.FieldTypeString:
+		return coerceString(val)
+	case config.FieldTypeBool:
+		return coerceBool(val)
 	case config.FieldTypeFloat:
 		return coerceFloat(val)
 	case config.FieldTypeInt:
 		return coerceInt(val)
 	case config.FieldTypeUint:
 		return coerceUint(val)
+	case config.FieldTypeUUID:
+		return coerceUUID(val)
+	case config.FieldTypeDatetime:
+		return coerceDatetime(val)
+	case config.FieldTypeVector:
+		return coerceVector(val, f.Dimension)
+	case config.FieldTypeStringArray:
+		return coerceArray(val, coerceString)
+	case config.FieldTypeBoolArray:
+		return coerceArray(val, coerceBool)
 	case config.FieldTypeFloatArray:
 		return coerceArray(val, coerceFloat)
 	case config.FieldTypeIntArray:
 		return coerceArray(val, coerceInt)
 	case config.FieldTypeUintArray:
 		return coerceArray(val, coerceUint)
+	case config.FieldTypeUUIDArray:
+		return coerceArray(val, coerceUUID)
+	case config.FieldTypeDatetimeArray:
+		return coerceArray(val, coerceDatetime)
 	default:
-		return val, nil
+		return nil, fmt.Errorf("unsupported field type %q", f.Type)
 	}
 }
 
@@ -279,6 +292,65 @@ func coerceUint(val any) (any, error) {
 	default:
 		return nil, fmt.Errorf("type mismatch: cannot coerce %T to uint", val)
 	}
+}
+
+func coerceString(val any) (any, error) {
+	if _, ok := val.(string); !ok {
+		return nil, fmt.Errorf("type mismatch: expected string, got %T", val)
+	}
+	return val, nil
+}
+
+func coerceBool(val any) (any, error) {
+	if _, ok := val.(bool); !ok {
+		return nil, fmt.Errorf("type mismatch: expected bool, got %T", val)
+	}
+	return val, nil
+}
+
+func coerceUUID(val any) (any, error) {
+	v, ok := val.(bson.Binary)
+	if !ok {
+		return nil, fmt.Errorf("type mismatch: expected Binary, got %T", val)
+	}
+	if v.Subtype != bson.TypeBinaryUUID {
+		return nil, fmt.Errorf("type mismatch: expected UUID binary subtype, got 0x%02x", v.Subtype)
+	}
+	if len(v.Data) != 16 {
+		return nil, fmt.Errorf("type mismatch: UUID binary has invalid length %d, expected 16", len(v.Data))
+	}
+	return formatUUID(v.Data), nil
+}
+
+func coerceDatetime(val any) (any, error) {
+	if _, ok := val.(time.Time); !ok {
+		return nil, fmt.Errorf("type mismatch: expected datetime, got %T", val)
+	}
+	return val, nil
+}
+
+func coerceVector(val any, dimension int) (any, error) {
+	arr, ok := val.(bson.A)
+	if !ok {
+		return nil, fmt.Errorf("type mismatch: expected array for vector, got %T", val)
+	}
+	if len(arr) != dimension {
+		return nil, fmt.Errorf("type mismatch: vector dimension %d does not match expected %d", len(arr), dimension)
+	}
+	result := make([]float32, len(arr))
+	for i, elem := range arr {
+		switch v := elem.(type) {
+		case float64:
+			result[i] = float32(v)
+		case int32:
+			result[i] = float32(v)
+		case int64:
+			result[i] = float32(v)
+		default:
+			return nil, fmt.Errorf("element [%d]: type mismatch: expected numeric, got %T", i, elem)
+		}
+	}
+	return result, nil
 }
 
 func coerceArray(val any, coerceFn func(any) (any, error)) (any, error) {
