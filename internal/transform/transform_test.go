@@ -406,3 +406,184 @@ func TestMapChangeEvent_Drop(t *testing.T) {
 		t.Errorf("got action type %d, want ActionSkip for drop", action.Type)
 	}
 }
+
+// --- Numeric Coercion ---
+
+func TestCoerceValue_FloatFromInt32(t *testing.T) {
+	f := config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}
+	got, err := coerceValue(int32(42), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != float64(42) {
+		t.Errorf("got %v (%T), want float64(42)", got, got)
+	}
+}
+
+func TestCoerceValue_FloatFromInt64(t *testing.T) {
+	f := config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}
+	got, err := coerceValue(int64(1000000), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != float64(1000000) {
+		t.Errorf("got %v (%T), want float64(1000000)", got, got)
+	}
+}
+
+func TestCoerceValue_FloatPassthrough(t *testing.T) {
+	f := config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}
+	got, err := coerceValue(float64(3.14), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != float64(3.14) {
+		t.Errorf("got %v, want 3.14", got)
+	}
+}
+
+func TestCoerceValue_FloatTypeMismatch(t *testing.T) {
+	f := config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}
+	_, err := coerceValue("not a number", f)
+	if err == nil {
+		t.Fatal("expected type mismatch error")
+	}
+}
+
+func TestCoerceValue_IntFromFloat64Whole(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeInt}
+	got, err := coerceValue(float64(42.0), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != int64(42) {
+		t.Errorf("got %v (%T), want int64(42)", got, got)
+	}
+}
+
+func TestCoerceValue_IntFromFloat64Fractional(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeInt}
+	_, err := coerceValue(float64(42.5), f)
+	if err == nil {
+		t.Fatal("expected type mismatch error for fractional float")
+	}
+}
+
+func TestCoerceValue_IntFromInt32(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeInt}
+	got, err := coerceValue(int32(7), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != int64(7) {
+		t.Errorf("got %v (%T), want int64(7)", got, got)
+	}
+}
+
+func TestCoerceValue_UintRejectsNegativeInt32(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeUint}
+	_, err := coerceValue(int32(-1), f)
+	if err == nil {
+		t.Fatal("expected error for negative value coerced to uint")
+	}
+}
+
+func TestCoerceValue_UintRejectsNegativeInt64(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeUint}
+	_, err := coerceValue(int64(-5), f)
+	if err == nil {
+		t.Fatal("expected error for negative value coerced to uint")
+	}
+}
+
+func TestCoerceValue_UintFromFloat64(t *testing.T) {
+	f := config.FieldMapping{Name: "count", Type: config.FieldTypeUint}
+	got, err := coerceValue(float64(100.0), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != uint64(100) {
+		t.Errorf("got %v (%T), want uint64(100)", got, got)
+	}
+}
+
+func TestCoerceValue_Null(t *testing.T) {
+	f := config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}
+	got, err := coerceValue(nil, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
+func TestCoerceValue_FloatArrayMixed(t *testing.T) {
+	f := config.FieldMapping{Name: "scores", Type: config.FieldTypeFloatArray}
+	input := bson.A{int32(1), float64(2.5), int64(3)}
+	got, err := coerceValue(input, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arr, ok := got.([]any)
+	if !ok {
+		t.Fatalf("expected []any, got %T", got)
+	}
+	if len(arr) != 3 {
+		t.Fatalf("expected 3 elements, got %d", len(arr))
+	}
+	for i, want := range []float64{1.0, 2.5, 3.0} {
+		if arr[i] != want {
+			t.Errorf("element [%d]: got %v (%T), want %v", i, arr[i], arr[i], want)
+		}
+	}
+}
+
+func TestCoerceValue_IntArrayBadElement(t *testing.T) {
+	f := config.FieldMapping{Name: "ids", Type: config.FieldTypeIntArray}
+	input := bson.A{int32(1), float64(2.5)}
+	_, err := coerceValue(input, f)
+	if err == nil {
+		t.Fatal("expected error for fractional element in int array")
+	}
+}
+
+func TestCoerceValue_NonNumericPassthrough(t *testing.T) {
+	f := config.FieldMapping{Name: "name", Type: config.FieldTypeString}
+	got, err := coerceValue("hello", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "hello" {
+		t.Errorf("got %v, want %q", got, "hello")
+	}
+}
+
+// Verify patch path uses coercion via extractFields.
+func TestMapChangeEvent_PatchCoercesFloat(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+	fields := []config.FieldMapping{
+		{Name: "calories", Type: config.FieldTypeFloat},
+	}
+
+	action, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:     mongo.OpUpdate,
+		DocumentID:    oid,
+		UpdatedFields: map[string]any{"calories": int32(400)},
+		ClusterTime:   SerializeClusterTime(10, 1),
+	}, testColl(fields, nil))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Type != ActionPatch {
+		t.Fatalf("got action type %d, want ActionPatch", action.Type)
+	}
+	v, ok := action.Attributes["calories"]
+	if !ok {
+		t.Fatal("expected calories in attributes")
+	}
+	if v != float64(400) {
+		t.Errorf("got %v (%T), want float64(400)", v, v)
+	}
+}

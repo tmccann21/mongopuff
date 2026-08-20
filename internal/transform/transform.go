@@ -3,6 +3,7 @@ package transform
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -135,18 +136,18 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 		return Action{}, err
 	}
 
-	mapped := fieldSet(coll.Mapping.Fields)
-	attrs := make(map[string]any)
-
-	for name, val := range event.UpdatedFields {
-		if _, ok := mapped[name]; ok {
-			attrs[name] = val
-		}
+	attrs, err := extractFields(event.UpdatedFields, coll.Mapping.Fields)
+	if err != nil {
+		return Action{}, err
 	}
 
+	// Removed fields are explicitly nulled in turbopuffer.
 	for _, name := range event.RemovedFields {
-		if _, ok := mapped[name]; ok {
-			attrs[name] = nil // explicit null in turbopuffer
+		for _, f := range coll.Mapping.Fields {
+			if f.Name == name {
+				attrs[name] = nil
+				break
+			}
 		}
 	}
 
@@ -186,16 +187,112 @@ func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string
 		if !exists {
 			continue
 		}
-		// TODO: type validation and conversion per FieldType
-		attrs[f.Name] = val
+		coerced, err := coerceValue(val, f)
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", f.Name, err)
+		}
+		attrs[f.Name] = coerced
 	}
 	return attrs, nil
 }
 
-func fieldSet(fields []config.FieldMapping) map[string]struct{} {
-	s := make(map[string]struct{}, len(fields))
-	for _, f := range fields {
-		s[f.Name] = struct{}{}
+// coerceValue converts a BSON value to the expected type per the field mapping.
+// Numeric coercion rules:
+//   - float: int32/int64 → float64
+//   - int: int32 → int64, float64 → int64 (if no fractional part)
+//   - uint: int32/int64 → uint64 (reject negatives), float64 → uint64 (if no fractional part, non-negative)
+//
+// Array variants apply the same rules per element.
+// nil (BSON null) passes through for all types.
+func coerceValue(val any, f config.FieldMapping) (any, error) {
+	if val == nil {
+		return nil, nil
 	}
-	return s
+
+	switch f.Type {
+	case config.FieldTypeFloat:
+		return coerceFloat(val)
+	case config.FieldTypeInt:
+		return coerceInt(val)
+	case config.FieldTypeUint:
+		return coerceUint(val)
+	case config.FieldTypeFloatArray:
+		return coerceArray(val, coerceFloat)
+	case config.FieldTypeIntArray:
+		return coerceArray(val, coerceInt)
+	case config.FieldTypeUintArray:
+		return coerceArray(val, coerceUint)
+	default:
+		return val, nil
+	}
+}
+
+func coerceFloat(val any) (any, error) {
+	switch v := val.(type) {
+	case float64:
+		return v, nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	default:
+		return nil, fmt.Errorf("type mismatch: cannot coerce %T to float", val)
+	}
+}
+
+func coerceInt(val any) (any, error) {
+	switch v := val.(type) {
+	case int32:
+		return int64(v), nil
+	case int64:
+		return v, nil
+	case float64:
+		if v != math.Trunc(v) {
+			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to int", v)
+		}
+		return int64(v), nil
+	default:
+		return nil, fmt.Errorf("type mismatch: cannot coerce %T to int", val)
+	}
+}
+
+func coerceUint(val any) (any, error) {
+	switch v := val.(type) {
+	case int32:
+		if v < 0 {
+			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+		}
+		return uint64(v), nil
+	case int64:
+		if v < 0 {
+			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+		}
+		return uint64(v), nil
+	case float64:
+		if v != math.Trunc(v) {
+			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to uint", v)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("type mismatch: negative value %v cannot be coerced to uint", v)
+		}
+		return uint64(v), nil
+	default:
+		return nil, fmt.Errorf("type mismatch: cannot coerce %T to uint", val)
+	}
+}
+
+func coerceArray(val any, coerceFn func(any) (any, error)) (any, error) {
+	arr, ok := val.(bson.A)
+	if !ok {
+		return nil, fmt.Errorf("type mismatch: expected array, got %T", val)
+	}
+	result := make([]any, len(arr))
+	for i, elem := range arr {
+		coerced, err := coerceFn(elem)
+		if err != nil {
+			return nil, fmt.Errorf("element [%d]: %w", i, err)
+		}
+		result[i] = coerced
+	}
+	return result, nil
 }
