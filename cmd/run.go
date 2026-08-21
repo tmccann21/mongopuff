@@ -27,26 +27,29 @@ func runCDC() error {
 	if err != nil {
 		return err
 	}
+	defer store.Close(context.Background())
 
-	dbName, _ := mongo.ParseDatabaseName(cfg.MongoDBConnectionString)
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
-		"database", dbName,
+		"database", store.DatabaseName(),
 	)
 
 	status := health.NewStatus()
 	mux := http.NewServeMux()
 	status.Register(mux)
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.HealthPort),
+		Handler: mux,
+	}
 	go func() {
-		addr := fmt.Sprintf(":%d", cfg.HealthPort)
-		slog.Info("http server starting", "addr", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		slog.Info("http server starting", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("http server error", "error", err)
 		}
 	}()
 
 	dlqWriter := store.NewDLQWriter()
-	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, "aws-us-west-2"), dlqWriter)
+	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, cfg.TurbopufferRegion), dlqWriter)
 
 	// Spawn a goroutine per collection.
 	var wg sync.WaitGroup
@@ -61,6 +64,9 @@ func runCDC() error {
 	}
 
 	wg.Wait()
+	if err := srv.Shutdown(context.Background()); err != nil {
+		slog.Error("http server shutdown error", "error", err)
+	}
 	slog.Info("mongopuff shut down")
 	return nil
 }
@@ -81,14 +87,16 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 
 	namespace := coll.Mapping.Namespace
 	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
-	batcher := batch.New(ctx, cfg.Global, func(
+	batcher := batch.New(cfg.Global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		slog.Info("flush",
 			"namespace", namespace,
 			"actions", len(actions),
 		)
-		w.WriteBatch(ctx, namespace, schema, actions)
+		if err := w.WriteBatch(ctx, namespace, schema, actions); err != nil {
+			return fmt.Errorf("write batch: %w", err)
+		}
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
@@ -118,12 +126,12 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 			return err
 		}
 
-		if err := batcher.Add(action, stream.ResumeToken()); err != nil {
+		if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
 			return fmt.Errorf("batch flush failed: %w", err)
 		}
 	}
 
-	if err := batcher.Flush(); err != nil {
+	if err := batcher.Flush(ctx); err != nil {
 		slog.Error("final flush failed", "collection", coll.Name, "error", err)
 	}
 

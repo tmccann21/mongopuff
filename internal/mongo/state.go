@@ -22,6 +22,7 @@ const (
 
 type Store struct {
 	db *mongo.Database
+	client *mongo.Client
 }
 
 func ParseDatabaseName(connStr string) (string, error) {
@@ -50,7 +51,15 @@ func NewStore(ctx context.Context, connStr string) (*Store, error) {
 		return nil, fmt.Errorf("pinging mongodb: %w", err)
 	}
 
-	return &Store{db: client.Database(dbName)}, nil
+	return &Store{db: client.Database(dbName), client: client}, nil
+}
+
+func (s *Store) Close(ctx context.Context) error {
+	return s.client.Disconnect(ctx)
+}
+
+func (s *Store) DatabaseName() string {
+	return s.db.Name()
 }
 
 func (s *Store) LoadCollectionConfigs(ctx context.Context) ([]config.CollectionConfig, error) {

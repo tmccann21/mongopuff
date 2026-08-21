@@ -3,6 +3,7 @@ package batch
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -24,7 +25,6 @@ type pendingFlush struct {
 // Batcher accumulates CDC actions and flushes when count, size, or time thresholds are hit.
 // Backfill does not use the batcher — pages are written directly by the backfill loop.
 type Batcher struct {
-	ctx     context.Context
 	config  config.GlobalConfig
 	flushFn FlushFunc
 
@@ -36,9 +36,8 @@ type Batcher struct {
 	resumeToken []byte // token of the most recent event added
 }
 
-func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
+func New(cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
 	return &Batcher{
-		ctx:     ctx,
 		config:  cfg,
 		flushFn: flushFn,
 		actions: make(map[string]transform.Action),
@@ -47,7 +46,7 @@ func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batch
 
 // Add adds an action to the batch, deduplicating by document ID (latest wins).
 // If a flush threshold is hit, the batch is flushed synchronously.
-func (b *Batcher) Add(action transform.Action, resumeToken []byte) error {
+func (b *Batcher) Add(ctx context.Context, action transform.Action, resumeToken []byte) error {
 	if action.Type == transform.ActionSkip {
 		return nil
 	}
@@ -65,7 +64,9 @@ func (b *Batcher) Add(action transform.Action, resumeToken []byte) error {
 	// Start the flush timer when the first event enters an empty batch.
 	if b.timer == nil {
 		b.timer = time.AfterFunc(b.config.FlushInterval(), func() {
-			b.Flush()
+			if err := b.Flush(context.Background()); err != nil {
+				slog.Error("timer flush failed", "error", err)
+			}
 		})
 	}
 
@@ -78,13 +79,13 @@ func (b *Batcher) Add(action transform.Action, resumeToken []byte) error {
 	b.mu.Unlock()
 
 	if pending != nil {
-		return b.flushFn(b.ctx, pending.actions, pending.resumeToken)
+		return b.flushFn(ctx, pending.actions, pending.resumeToken)
 	}
 	return nil
 }
 
 // Flush forces a flush of all pending actions.
-func (b *Batcher) Flush() error {
+func (b *Batcher) Flush(ctx context.Context) error {
 	b.mu.Lock()
 	pending := b.drainLocked()
 	b.mu.Unlock()
@@ -92,7 +93,7 @@ func (b *Batcher) Flush() error {
 	if pending == nil {
 		return nil
 	}
-	return b.flushFn(b.ctx, pending.actions, pending.resumeToken)
+	return b.flushFn(ctx, pending.actions, pending.resumeToken)
 }
 
 // drainLocked extracts the current batch and resets internal state.

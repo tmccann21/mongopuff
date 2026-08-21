@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -30,17 +31,19 @@ func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 
 // WriteBatch writes a batch of actions to turbopuffer in a single API call.
 // On failure, writes all actions to the DLQ.
-func (w *Writer) WriteBatch(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) {
+func (w *Writer) WriteBatch(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
 	if len(actions) == 0 {
-		return
+		return nil
 	}
 
 	if err := w.tpuf.Write(ctx, namespace, schema, actions); err != nil {
-		w.sendToDLQ(ctx, namespace, actions, err)
+		return w.sendToDLQ(ctx, namespace, actions, err)
 	}
+
+	return nil
 }
 
-func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []transform.Action, writeErr error) {
+func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []transform.Action, writeErr error) error {
 	errKind := turbopuffer.ClassifyError(writeErr)
 	slog.Error("turbopuffer write failed, sending to DLQ",
 		"namespace", namespace,
@@ -60,12 +63,11 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 			CreatedAt:    time.Now(),
 		}
 		if err := w.dlq.Write(ctx, entry); err != nil {
-			slog.Error("failed to write to DLQ",
-				"documentId", a.DocumentID,
-				"error", err,
-			)
+			return fmt.Errorf("DLQ write failed for document %s: %w", a.DocumentID, err)
 		}
 	}
+
+	return nil
 }
 
 func operationFromAction(t transform.ActionType) mongo.Operation {
@@ -77,6 +79,6 @@ func operationFromAction(t transform.ActionType) mongo.Operation {
 	case transform.ActionDelete:
 		return mongo.OpDelete
 	default:
-		return ""
+		panic(fmt.Sprintf("unreachable: unknown action type %d", t))
 	}
 }

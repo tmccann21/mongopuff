@@ -112,6 +112,7 @@ type AppConfig struct {
 	LogLevel                string
 	MongoDBConnectionString string
 	TurbopufferAPIKey       string
+	TurbopufferRegion       string
 
 	Global      GlobalConfig
 	Collections []CollectionConfig
@@ -147,10 +148,16 @@ func LoadEnv() (*AppConfig, error) {
 		return nil, fmt.Errorf("TURBOPUFFER_API_KEY is required")
 	}
 
+	region := os.Getenv("TURBOPUFFER_REGION")
+	if region == "" {
+		region = "aws-us-west-2"
+	}
+
 	return &AppConfig{
 		HealthPort:              port,
 		LogLevel:                os.Getenv("LOG_LEVEL"),
 		MongoDBConnectionString: connStr,
 		TurbopufferAPIKey:       apiKey,
+		TurbopufferRegion:       region,
 	}, nil
 }
