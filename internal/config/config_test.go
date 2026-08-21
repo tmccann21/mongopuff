@@ -233,9 +233,6 @@ func TestValidate_GlobalDefaults(t *testing.T) {
 	if eff.BatchFlushCount != DefaultBatchFlushCount {
 		t.Errorf("got flush count %d, want %d", eff.BatchFlushCount, DefaultBatchFlushCount)
 	}
-	if eff.BatchFlushSize != DefaultBatchFlushSize {
-		t.Errorf("got flush size %d, want %d", eff.BatchFlushSize, DefaultBatchFlushSize)
-	}
 	if eff.BatchFlushTimeMs != DefaultBatchFlushTimeMs {
 		t.Errorf("got flush time %d, want %d", eff.BatchFlushTimeMs, DefaultBatchFlushTimeMs)
 	}
@@ -247,9 +244,6 @@ func TestValidate_GlobalOverrides(t *testing.T) {
 
 	if eff.BatchFlushCount != 512 {
 		t.Errorf("got flush count %d, want 512", eff.BatchFlushCount)
-	}
-	if eff.BatchFlushSize != DefaultBatchFlushSize {
-		t.Errorf("got flush size %d, want %d (default)", eff.BatchFlushSize, DefaultBatchFlushSize)
 	}
 	if eff.BatchFlushTimeMs != DefaultBatchFlushTimeMs {
 		t.Errorf("got flush time %d, want %d (default)", eff.BatchFlushTimeMs, DefaultBatchFlushTimeMs)

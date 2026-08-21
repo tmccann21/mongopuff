@@ -75,14 +75,12 @@ func (c *CollectionConfig) EffectiveBackfillPageSize() int {
 
 type GlobalConfig struct {
 	BatchFlushCount  int `bson:"batchFlushCount,omitempty"`
-	BatchFlushSize   int `bson:"batchFlushSize,omitempty"`
 	BatchFlushTimeMs int `bson:"batchFlushTimeMs,omitempty"`
 }
 
 const (
 	DefaultBatchFlushCount  = 1024
-	DefaultBatchFlushSize   = 8 * 1024 * 1024 // 8MB
-	DefaultBatchFlushTimeMs = 1000            // 1s
+	DefaultBatchFlushTimeMs = 1000 // 1s
 )
 
 func (g GlobalConfig) FlushInterval() time.Duration {
@@ -97,9 +95,6 @@ func (g GlobalConfig) Effective() GlobalConfig {
 	out := g
 	if out.BatchFlushCount <= 0 {
 		out.BatchFlushCount = DefaultBatchFlushCount
-	}
-	if out.BatchFlushSize <= 0 {
-		out.BatchFlushSize = DefaultBatchFlushSize
 	}
 	if out.BatchFlushTimeMs <= 0 {
 		out.BatchFlushTimeMs = DefaultBatchFlushTimeMs

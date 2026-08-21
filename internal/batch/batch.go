@@ -2,7 +2,6 @@ package batch
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,7 +21,7 @@ type pendingFlush struct {
 	resumeToken []byte
 }
 
-// Batcher accumulates CDC actions and flushes when count, size, or time thresholds are hit.
+// Batcher accumulates CDC actions and flushes when count or time thresholds are hit.
 // Backfill does not use the batcher — pages are written directly by the backfill loop.
 type Batcher struct {
 	config  config.GlobalConfig
@@ -31,7 +30,6 @@ type Batcher struct {
 	mu          sync.Mutex
 	actions     map[string]transform.Action // keyed by DocumentID for dedup
 	order       []string                    // insertion order of document IDs
-	sizeBytes   int
 	timer       *time.Timer
 	resumeToken []byte // token of the most recent event added
 }
@@ -58,7 +56,6 @@ func (b *Batcher) Add(ctx context.Context, action transform.Action, resumeToken 
 		b.order = append(b.order, action.DocumentID)
 	}
 	b.actions[action.DocumentID] = action
-	b.sizeBytes += estimateSize(action)
 	b.resumeToken = resumeToken
 
 	// Start the flush timer when the first event enters an empty batch.
@@ -70,9 +67,9 @@ func (b *Batcher) Add(ctx context.Context, action transform.Action, resumeToken 
 		})
 	}
 
-	// Check count and size thresholds.
+	// Check count threshold.
 	var pending *pendingFlush
-	if len(b.actions) >= b.config.BatchFlushCount || b.sizeBytes >= b.config.BatchFlushSize {
+	if len(b.actions) >= b.config.BatchFlushCount {
 		pending = b.drainLocked()
 	}
 
@@ -113,7 +110,6 @@ func (b *Batcher) drainLocked() *pendingFlush {
 	token := b.resumeToken
 	b.actions = make(map[string]transform.Action)
 	b.order = b.order[:0]
-	b.sizeBytes = 0
 	b.resumeToken = nil
 
 	if b.timer != nil {
@@ -124,17 +120,3 @@ func (b *Batcher) drainLocked() *pendingFlush {
 	return &pendingFlush{actions: batch, resumeToken: token}
 }
 
-func estimateSize(action transform.Action) int {
-	switch action.Type {
-	case transform.ActionDelete:
-		return 50
-	case transform.ActionUpsert, transform.ActionPatch:
-		data, err := json.Marshal(action.Attributes)
-		if err != nil {
-			return 100
-		}
-		return len(data)
-	default:
-		return 0
-	}
-}
