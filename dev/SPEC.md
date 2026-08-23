@@ -107,7 +107,8 @@ base functionality and throughput over advanced features.
 
 ## Graceful Shutdown
 intercept SIGTERM/SIGINT, flush pending batch and save resume token for each collection to _mongopuff_state. Each go-routine
-handles this independently. Flush gets 1 try before writing remaining data to DLQ to not risk total loss.
+handles this independently. If the final flush fails, log the error and exit without advancing the resume token — the batch
+will be replayed from the last saved token on restart. Conditional writes make this safe.
 
 # Modes
 ## CDC Mode
@@ -128,14 +129,23 @@ all changes persisted to turbopuffer have a `_clusterTime` field used for condit
 Deletion events are replicated in turbopuffer by default. This behaviour can be configured within the config document for a collection
 
 ### Dead-Letter Queue
-mongopuff creates a dead letter queue on the mongodb database with a collection named _mongopuff_dlq. documents in the dlq have the following shape
+mongopuff creates a dead letter queue on the mongodb database with a collection named _mongopuff_dlq. The DLQ is reserved
+for **data problems** — documents that fail transformation due to bad data. These are poison messages that will never succeed
+on retry and require operator attention (e.g. fixing the document in MongoDB or updating the mapping config).
+
+Infrastructure errors (turbopuffer down, network issues, rate limiting) are **not** written to the DLQ. These are transient
+failures handled by the SDK's built-in retry with exponential backoff. When retries are exhausted, the batch is written to
+the DLQ as a last resort to avoid blocking the change stream indefinitely — the oplog is a ticking clock and holding a batch
+too long risks oplog rollover, which would require a full re-backfill (far more expensive than DLQ replay).
+
+Documents in the DLQ have the following shape
 
  {
     "_id": <default objectid>,
     "collection": <collection>,
     "documentId": "<original _id, as string>",
     "operation": <insert|update|replace|delete>,
-    "errorKind": <write_rejected|network_error|rate_limited|server_error>,
+    "errorKind": <type_mismatch|id_missing|write_rejected|network_error|rate_limited|server_error>,
     "errorMessage": <string>,
     "clusterTime": Timestamp(1234, 1),
     "createdAt": ISODate,
@@ -144,14 +154,23 @@ mongopuff creates a dead letter queue on the mongodb database with a collection 
 ### Error Handling
 Error types with corresponding action
 
-type_mismatch - log + skip
-id_missing - log + skip
-write_rejected - DLQ
-network_error - DLQ
-rate_limited - 429 from tpuff; DLQ
-server_error - 500 from tpuff; DLQ
+**Transform errors (data problems) — DLQ immediately, advance resume token:**
+type_mismatch - DLQ; document has a field value that doesn't match the configured type
+id_missing - DLQ; document has no _id or an unsupported _id type
 
-retry is handled by the turbopuffer Go SDK's built-in retry mechanism (exponential backoff, retries on 408/429/5xx/connection errors). mongopuff does not implement its own retry logic. When the SDK exhausts retries and returns an error, the failing documents are written to the DLQ.
+These are per-document problems. The document is skipped so it doesn't block the stream, and recorded in the DLQ for
+operator visibility. The operator can fix the document in MongoDB, which will emit a new change event that processes correctly.
+
+**Write errors (infrastructure problems) — SDK retries, then DLQ as last resort:**
+write_rejected - DLQ after SDK retry exhaustion
+network_error - DLQ after SDK retry exhaustion
+rate_limited - 429 from tpuff; DLQ after SDK retry exhaustion
+server_error - 500 from tpuff; DLQ after SDK retry exhaustion
+
+Retry is handled entirely by the turbopuffer Go SDK's built-in retry mechanism (exponential backoff, retries on
+408/429/5xx/connection errors). mongopuff does not implement its own retry logic. When the SDK exhausts retries and
+returns an error, the entire batch is written to the DLQ and the resume token advances. This is a pragmatic tradeoff:
+holding the batch indefinitely risks oplog rollover, which is unrecoverable without a full re-backfill.
 
 ## Backfill Mode
 Scan a collection and mirror all matching documents to turbopuffer; resumable and progress-reporting. Page size is determined by the collection config document (default is 128)
@@ -201,7 +220,10 @@ flush interval: 1s
 
 after flushing, and confirming the write to tpuff the new resume stream token should be written to the relevant collection. must wait for tpuff confirmation; failing to persist the token is not a large issue as we only guarantee at-least-once delivery and this failure should be rare
 
-on partial failures within a batch, write the failing documents to DLQ and retry the batch without the offending documents
+on write failure (after SDK retry exhaustion), the entire batch is written to the DLQ and the resume token advances.
+batches fail or succeed as a unit — there is no per-document isolation within a batch. Operators should tune batch size
+based on their expected document size for best performance.
+
 within a batch no two updates can reference the same document by id. if this collision occurs, use the most recent
 
 Backfill batching is handled implicitly by page size, and therefore does not have any additional batcher logic

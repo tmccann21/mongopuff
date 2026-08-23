@@ -123,7 +123,22 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 		action, err := transform.MapChangeEvent(event, coll)
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "error", err)
-			return err
+			docID, idErr := transform.SerializeID(event.DocumentID)
+			errKind := mongo.ErrTypeMismatch
+			if idErr != nil {
+				docID = fmt.Sprintf("%v", event.DocumentID)
+				errKind = mongo.ErrIDMissing
+			}
+			dlqWriter.Write(ctx, mongo.DLQEntry{
+				Collection: coll.Name,
+				DocumentID: docID,
+				Operation:  event.Operation,
+				ErrorKind:  errKind,
+				ErrorMessage: err.Error(),
+				ClusterTime:  event.ClusterTime,
+				CreatedAt:    time.Now(),
+			})
+			continue
 		}
 
 		if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
