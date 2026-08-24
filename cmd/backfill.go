@@ -52,25 +52,32 @@ func runBackfill() error {
 		return err
 	}
 	lastID := state.BackfillCursor
+	pageSize := collCfg.EffectiveBackfillPageSize()
+	page := 0
 	for {
+		page++
 		opTime, err := store.PingOperationTime(ctx)
 		if err != nil {
 			return fmt.Errorf("ping operation time: %w", err)
 		}
 
-		slog.Info("got operation time", "collection", collCfg.Name, "operationTime", opTime)
-
-		docs, err := scanner.ScanPage(ctx, lastID, collCfg.EffectiveBackfillPageSize())
+		docs, err := scanner.ScanPage(ctx, lastID, pageSize)
 		if err != nil {
 			return fmt.Errorf("scan page: %w", err)
 		}
 
 		if len(docs) == 0 {
-			slog.Info("no more docs", "collection", collCfg.Name, "lastID", lastID)
+			slog.Info("backfill complete", "collection", collCfg.Name, "pages", page-1)
 			break
 		}
 
-		slog.Info("scanned page", "collection", collCfg.Name, "docs", len(docs))
+		slog.Info("scanned page",
+			"collection", collCfg.Name,
+			"page", page,
+			"pageSize", pageSize,
+			"docs", len(docs),
+			"cursor", lastID,
+		)
 		actions := make([]transform.Action, 0, len(docs))
 		for _, doc := range docs {
 			action, err := transform.MapDocument(doc, opTime, collCfg)
@@ -88,7 +95,7 @@ func runBackfill() error {
 		if err := store.SaveBackfillCursor(ctx, collCfg.Name, lastID); err != nil {
 			return fmt.Errorf("saving backfill cursor: %w", err)
 		}
-		slog.Info("last id", "collection", collCfg.Name, "id", lastID)
+		slog.Info("page written", "collection", collCfg.Name, "page", page, "cursor", lastID)
 	}
 
 	return nil

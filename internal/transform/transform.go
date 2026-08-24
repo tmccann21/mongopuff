@@ -25,6 +25,7 @@ const (
 // Action is what gets sent to turbopuffer after transforming a change event.
 type Action struct {
 	Type        ActionType
+	Operation   mongo.Operation // original MongoDB operation (insert, update, replace, delete)
 	DocumentID  string
 	Attributes  map[string]any // field name → value
 	ClusterTime uint64
@@ -106,6 +107,7 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 
 	return Action{
 		Type:        ActionUpsert,
+		Operation:   mongo.OpInsert,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: clusterTime,
@@ -125,6 +127,7 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionUpsert,
+		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: event.ClusterTime,
@@ -158,6 +161,7 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 
 	return Action{
 		Type:        ActionPatch,
+		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: event.ClusterTime,
@@ -176,6 +180,7 @@ func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionDelete,
+		Operation:   event.Operation,
 		DocumentID:  docID,
 		ClusterTime: event.ClusterTime,
 	}, nil

@@ -56,7 +56,7 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 		entry := mongo.DLQEntry{
 			Collection:   namespace,
 			DocumentID:   a.DocumentID,
-			Operation:    operationFromAction(a.Type),
+			Operation:    a.Operation,
 			ErrorKind:    errKind,
 			ErrorMessage: writeErr.Error(),
 			ClusterTime:  a.ClusterTime,
@@ -70,15 +70,3 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 	return nil
 }
 
-func operationFromAction(t transform.ActionType) mongo.Operation {
-	switch t {
-	case transform.ActionUpsert:
-		return mongo.OpInsert
-	case transform.ActionPatch:
-		return mongo.OpUpdate
-	case transform.ActionDelete:
-		return mongo.OpDelete
-	default:
-		panic(fmt.Sprintf("unreachable: unknown action type %d", t))
-	}
-}

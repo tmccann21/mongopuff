@@ -90,13 +90,15 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	batcher := batch.New(cfg.Global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
-		slog.Info("flush",
-			"namespace", namespace,
-			"actions", len(actions),
-		)
+		flushStart := time.Now()
 		if err := w.WriteBatch(ctx, namespace, schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
+		slog.Info("flush",
+			"namespace", namespace,
+			"batchSize", len(actions),
+			"flushDuration", time.Since(flushStart),
+		)
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
@@ -118,6 +120,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 			"operation", event.Operation,
 			"documentId", event.DocumentID,
 			"clusterTime", event.ClusterTime,
+			"clockTime", time.Now(),
 		)
 
 		action, err := transform.MapChangeEvent(event, coll)
@@ -129,7 +132,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 				docID = fmt.Sprintf("%v", event.DocumentID)
 				errKind = mongo.ErrIDMissing
 			}
-			dlqWriter.Write(ctx, mongo.DLQEntry{
+			err = dlqWriter.Write(ctx, mongo.DLQEntry{
 				Collection: coll.Name,
 				DocumentID: docID,
 				Operation:  event.Operation,
@@ -138,6 +141,9 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 				ClusterTime:  event.ClusterTime,
 				CreatedAt:    time.Now(),
 			})
+			if err != nil {
+				slog.Error("DLQ write error", "collection", coll.Name, "error", err)
+			}
 			continue
 		}
 
