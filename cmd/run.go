@@ -87,7 +87,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 
 	namespace := coll.Mapping.Namespace
 	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
-	batcher := batch.New(cfg.Global, func(
+	batcher := batch.New(ctx, cfg.Global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		flushStart := time.Now()
@@ -152,7 +152,7 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 		}
 	}
 
-	if err := batcher.Flush(ctx); err != nil {
+	if err := batcher.Close(ctx); err != nil {
 		slog.Error("final flush failed", "collection", coll.Name, "error", err)
 	}
 

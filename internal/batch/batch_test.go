@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,10 +87,11 @@ func smallUpsert(id string) transform.Action {
 func TestBatchFlushOnCount(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(3, 60000) // high time so only count triggers
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	for i := range 3 {
-		if err := b.Add(context.Background(),smallUpsert(fmt.Sprintf("id-%d", i)), []byte("tok")); err != nil {
+		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("id-%d", i)), []byte("tok")); err != nil {
 			t.Fatalf("Add(%d): %v", i, err)
 		}
 	}
@@ -106,9 +108,10 @@ func TestBatchFlushOnInterval(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 50) // 50ms interval
 
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(),smallUpsert("a"), []byte("tok")); err != nil {
+	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,12 +129,13 @@ func TestBatchFlushOnInterval(t *testing.T) {
 func TestBatchDedupSameID(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(),upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
+	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add(context.Background(),upsertAction("a", map[string]any{"v": 2}), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 2}), []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -153,12 +157,13 @@ func TestBatchDedupSameID(t *testing.T) {
 func TestBatchDedupInsertThenDelete(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(),upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
+	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add(context.Background(),deleteAction("a"), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), deleteAction("a"), []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -177,7 +182,8 @@ func TestBatchDedupInsertThenDelete(t *testing.T) {
 func TestBatchEmptyNoFlush(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	if err := b.Flush(context.Background()); err != nil {
 		t.Fatal(err)
@@ -191,7 +197,8 @@ func TestBatchSkipActionIgnored(t *testing.T) {
 	spy := &flushSpy{}
 	// Count threshold of 2: if skip leaks in, adding the upsert would make count=2 and trigger a flush.
 	cfg := testConfig(2, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	skip := transform.Action{
 		Type:       transform.ActionSkip,
@@ -227,10 +234,11 @@ func TestBatchSkipActionIgnored(t *testing.T) {
 func TestBatchPreservesInsertionOrder(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	for _, id := range []string{"c", "a", "b"} {
-		if err := b.Add(context.Background(),smallUpsert(id), []byte("tok")); err != nil {
+		if err := b.Add(context.Background(), smallUpsert(id), []byte("tok")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -253,11 +261,12 @@ func TestBatchPreservesInsertionOrder(t *testing.T) {
 func TestBatchResumeTokenTracksLatest(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	for i := range 3 {
 		tok := []byte(fmt.Sprintf("token-%d", i))
-		if err := b.Add(context.Background(),smallUpsert(fmt.Sprintf("id-%d", i)), tok); err != nil {
+		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("id-%d", i)), tok); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -276,9 +285,10 @@ func TestBatchFlushErrorPropagated(t *testing.T) {
 	spy := &flushSpy{err: flushErr}
 	cfg := testConfig(1, 60000) // flush on every add
 
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
-	err := b.Add(context.Background(),smallUpsert("a"), []byte("tok"))
+	err := b.Add(context.Background(), smallUpsert("a"), []byte("tok"))
 	if !errors.Is(err, flushErr) {
 		t.Errorf("expected flush error, got %v", err)
 	}
@@ -288,11 +298,12 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(2, 60000) // flush every 2
 
-	b := New(cfg, spy.fn())
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
 
 	// First batch: 2 actions → auto flush.
 	for i := range 2 {
-		if err := b.Add(context.Background(),smallUpsert(fmt.Sprintf("a-%d", i)), []byte("t1")); err != nil {
+		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("a-%d", i)), []byte("t1")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -304,7 +315,7 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 	}
 
 	// Second batch: 1 action, manual flush.
-	if err := b.Add(context.Background(),smallUpsert("b-0"), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), smallUpsert("b-0"), []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -318,3 +329,137 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 	}
 }
 
+// TestConcurrentFlushSerialized proves that flushFn must not be called
+// concurrently. The timer goroutine and the count-threshold path in Add
+// can both call flushFn outside the mutex — two concurrent flushes of the
+// same collection. Everything else (lost errors, token regression, data
+// loss) follows from that.
+//
+// This test should FAIL on code that calls flushFn from both the timer
+// goroutine and the Add goroutine, and PASS once flushes are serialized.
+func TestConcurrentFlushSerialized(t *testing.T) {
+	var concurrent atomic.Int32
+	var maxConc atomic.Int32
+
+	cfg := testConfig(2, 1) // count=2, interval=1ms
+	b := New(context.Background(), cfg, func(ctx context.Context, actions []transform.Action, resumeToken []byte) error {
+		cur := concurrent.Add(1)
+		defer concurrent.Add(-1)
+
+		// Update high-water mark.
+		for {
+			old := maxConc.Load()
+			if cur <= old || maxConc.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+
+		// Hold the flush open long enough for the other goroutine to enter.
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	})
+	defer b.Close(context.Background())
+
+	// Add one event — starts the 1ms timer.
+	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok-old")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Let the timer fire and enter flushFn (sleeping 50ms inside).
+	time.Sleep(10 * time.Millisecond)
+
+	// Add a second event — hits count=2 threshold, triggering a
+	// synchronous flush from the Add goroutine.
+	if err := b.Add(context.Background(), smallUpsert("b"), []byte("tok-new")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for both flushes to finish.
+	time.Sleep(200 * time.Millisecond)
+
+	if mc := maxConc.Load(); mc > 1 {
+		t.Fatalf("flushFn called concurrently (max in-flight = %d), want serialized (max = 1)", mc)
+	}
+}
+
+func TestCloseFlushesRemaining(t *testing.T) {
+	spy := &flushSpy{}
+	cfg := testConfig(9999, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+
+	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if spy.callCount() != 1 {
+		t.Fatalf("expected Close to flush remaining, got %d calls", spy.callCount())
+	}
+	if got := len(spy.lastCall().actions); got != 1 {
+		t.Errorf("flushed %d actions, want 1", got)
+	}
+}
+
+func TestCloseThenAddReturnsError(t *testing.T) {
+	spy := &flushSpy{}
+	cfg := testConfig(9999, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	err := b.Add(context.Background(), smallUpsert("a"), []byte("tok"))
+	if err == nil {
+		t.Fatal("expected error from Add after Close")
+	}
+}
+
+func TestCloseIdempotent(t *testing.T) {
+	spy := &flushSpy{}
+	cfg := testConfig(9999, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCloseWaitsForInflightFlush verifies that Close blocks until a
+// timer-initiated flush completes. Without this guarantee, the caller
+// can tear down connections while flushFn is still writing.
+func TestCloseWaitsForInflightFlush(t *testing.T) {
+	var inFlight atomic.Int32
+
+	cfg := testConfig(9999, 1) // 1ms timer, high count so only timer triggers
+	b := New(context.Background(), cfg, func(ctx context.Context, actions []transform.Action, resumeToken []byte) error {
+		inFlight.Add(1)
+		defer inFlight.Add(-1)
+		time.Sleep(100 * time.Millisecond) // simulate slow Turbopuffer write
+		return nil
+	})
+
+	// Add an event — starts the 1ms timer.
+	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Let the timer fire and enter flushFn.
+	time.Sleep(10 * time.Millisecond)
+
+	// Close must wait for the in-flight flush to finish.
+	if err := b.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// After Close returns, no flush should still be running.
+	if n := inFlight.Load(); n != 0 {
+		t.Fatalf("flushFn still in-flight after Close returned (count = %d)", n)
+	}
+}
