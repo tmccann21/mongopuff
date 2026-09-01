@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type FieldType string
@@ -38,25 +40,23 @@ const (
 )
 
 type FieldMapping struct {
-	Name      string          `bson:"name"`
-	Type      FieldType       `bson:"type"`
-	Dimension int             `bson:"dimension,omitempty"` // vector only
-	Precision VectorPrecision `bson:"precision,omitempty"` // vector only
-	Filterable *bool           `bson:"filterable,omitempty"`
+	Name      string          `yaml:"name"`
+	Type      FieldType       `yaml:"type"`
+	Dimension int             `yaml:"dimension,omitempty"` // vector only
+	Precision VectorPrecision `yaml:"precision,omitempty"` // vector only
+	Filterable *bool           `yaml:"filterable,omitempty"`
 }
 
 type MappingConfig struct {
-	Namespace string         `bson:"namespace"`
-	Fields    []FieldMapping `bson:"fields"`
+	Namespace string         `yaml:"namespace"`
+	Fields    []FieldMapping `yaml:"fields"`
 }
 
-// CollectionConfig is the shape of a document in the _mongopuff collection.
-// Managed by the operator.
 type CollectionConfig struct {
-	Name             string        `bson:"_id"`
-	BackfillPageSize int           `bson:"backfillPageSize,omitempty"`
-	MirrorDeletes    *bool         `bson:"mirrorDeletes,omitempty"`
-	Mapping          MappingConfig `bson:"mapping"`
+	Name             string        `yaml:"name"`
+	BackfillPageSize int           `yaml:"backfillPageSize,omitempty"`
+	MirrorDeletes    *bool         `yaml:"mirrorDeletes,omitempty"`
+	Mapping          MappingConfig `yaml:"mapping"`
 }
 
 func (c *CollectionConfig) MirrorDeletesEnabled() bool {
@@ -74,8 +74,13 @@ func (c *CollectionConfig) EffectiveBackfillPageSize() int {
 }
 
 type GlobalConfig struct {
-	BatchFlushCount  int `bson:"batchFlushCount,omitempty"`
-	BatchFlushTimeMs int `bson:"batchFlushTimeMs,omitempty"`
+	BatchFlushCount  int `yaml:"batchFlushCount,omitempty"`
+	BatchFlushTimeMs int `yaml:"batchFlushTimeMs,omitempty"`
+}
+
+type ConfigFile struct {
+	Collections []CollectionConfig `yaml:"collections"`
+	Global GlobalConfig `yaml:"global"` 
 }
 
 const (
@@ -108,6 +113,7 @@ type AppConfig struct {
 	MongoDBConnectionString string
 	TurbopufferAPIKey       string
 	TurbopufferRegion       string
+	ConfigFilePath          string
 
 	Global      GlobalConfig
 	Collections []CollectionConfig
@@ -148,11 +154,32 @@ func LoadEnv() (*AppConfig, error) {
 		region = "aws-us-west-2"
 	}
 
+	configFilePath := os.Getenv("CONFIG_FILE_PATH")
+	if configFilePath == "" {
+		configFilePath = "mongopuff.yaml"
+	}
+
 	return &AppConfig{
 		HealthPort:              port,
 		LogLevel:                os.Getenv("LOG_LEVEL"),
 		MongoDBConnectionString: connStr,
 		TurbopufferAPIKey:       apiKey,
 		TurbopufferRegion:       region,
+		ConfigFilePath:          configFilePath,
 	}, nil
+}
+
+func LoadConfigFile(path string) ([]CollectionConfig, GlobalConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, GlobalConfig{}, err
+	}
+
+	var cfg ConfigFile
+	err = yaml.Unmarshal(data, &cfg)
+	if err != nil {
+		return nil, GlobalConfig{}, err
+	}
+
+	return cfg.Collections, cfg.Global, nil
 }

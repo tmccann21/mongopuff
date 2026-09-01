@@ -10,14 +10,10 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
-
-	"github.com/tmccann21/mongopuff/internal/config"
 )
 
 const (
-	mongopuffCollection      = "_mongopuff"
 	mongopuffStateCollection = "_mongopuff_state"
-	globalDocID              = "_global"
 )
 
 type Store struct {
@@ -60,47 +56,6 @@ func (s *Store) Close(ctx context.Context) error {
 
 func (s *Store) DatabaseName() string {
 	return s.db.Name()
-}
-
-func (s *Store) LoadCollectionConfigs(ctx context.Context) ([]config.CollectionConfig, error) {
-	coll := s.db.Collection(mongopuffCollection)
-
-	cursor, err := coll.Find(ctx, bson.M{"_id": bson.M{"$ne": globalDocID}})
-	if err != nil {
-		return nil, fmt.Errorf("querying _mongopuff: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var configs []config.CollectionConfig
-	if err := cursor.All(ctx, &configs); err != nil {
-		return nil, fmt.Errorf("decoding _mongopuff documents: %w", err)
-	}
-
-	// Default namespace to collection name if not set.
-	for i := range configs {
-		if configs[i].Mapping.Namespace == "" {
-			configs[i].Mapping.Namespace = configs[i].Name
-		}
-	}
-
-	return configs, nil
-}
-
-// LoadGlobalConfig reads the _global document from _mongopuff.
-// Returns a zero GlobalConfig if the document does not exist.
-func (s *Store) LoadGlobalConfig(ctx context.Context) (config.GlobalConfig, error) {
-	coll := s.db.Collection(mongopuffCollection)
-
-	var gc config.GlobalConfig
-	err := coll.FindOne(ctx, bson.M{"_id": globalDocID}).Decode(&gc)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return config.GlobalConfig{}, nil
-	}
-	if err != nil {
-		return config.GlobalConfig{}, fmt.Errorf("reading _global config: %w", err)
-	}
-
-	return gc, nil
 }
 
 func (s *Store) SaveResumeToken(ctx context.Context, collection string, resumeToken []byte) error {

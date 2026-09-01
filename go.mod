@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/turbopuffer/turbopuffer-go/v2 v2.6.0
 	go.mongodb.org/mongo-driver/v2 v2.8.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

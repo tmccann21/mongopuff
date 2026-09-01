@@ -39,16 +39,11 @@ func loadConfig(ctx context.Context) (*config.AppConfig, *mongo.Store, error) {
 		return nil, nil, fmt.Errorf("connecting to mongodb: %w", err)
 	}
 
-	collections, err := store.LoadCollectionConfigs(ctx)
+	collections, global, err := config.LoadConfigFile(cfg.ConfigFilePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading collection configs: %w", err)
+		return nil, nil, fmt.Errorf("loading config yaml: %w", err)
 	}
 	cfg.Collections = collections
-
-	global, err := store.LoadGlobalConfig(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading global config: %w", err)
-	}
 	cfg.Global = global.Effective()
 
 	if err := config.Validate(cfg); err != nil {

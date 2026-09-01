@@ -16,6 +16,10 @@ func Execute() error {
 		return runCDC()
 	case "backfill":
 		return runBackfill()
+	case "validate":
+		return runValidate()
+	case "init":
+		return runInit()
 	default:
 		return fmt.Errorf("unknown command: %s", os.Args[1])
 	}
