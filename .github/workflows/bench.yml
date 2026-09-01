@@ -1,0 +1,63 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build benchmark
+        run: go build -o bench ./dev/bench/
+
+      - name: Throughput by flush latency (batch_size=1024)
+        run: |
+          echo "| flush latency | throughput |"
+          echo "|---------------|------------|"
+          for latency in 0ms 10ms 25ms 50ms 100ms 165ms 248ms 500ms 850ms; do
+            result=$(./bench --events=100000 --flush-latency=$latency 2>&1 | grep "throughput")
+            throughput=$(echo "$result" | awk '{print $2, $3}')
+            echo "| $latency | $throughput |"
+          done
+
+      - name: Throughput by batch size (flush_latency=165ms)
+        run: |
+          echo "| batch size | throughput |"
+          echo "|------------|------------|"
+          for bs in 128 256 512 1024 2048 4096; do
+            result=$(./bench --events=100000 --flush-latency=165ms --batch-size=$bs 2>&1 | grep "throughput")
+            throughput=$(echo "$result" | awk '{print $2, $3}')
+            echo "| $bs | $throughput |"
+          done
+
+      - name: Memory by collection count (flush_latency=100ms)
+        run: |
+          echo "| collections | peak RSS | bytes/event | per-collection throughput |"
+          echo "|-------------|----------|-------------|--------------------------|"
+          for n in 1 10 50 100 500; do
+            output=$(./bench --events=100000 --flush-latency=100ms --collections=$n 2>&1)
+            throughput=$(echo "$output" | grep "throughput" | awk '{print $2}')
+            bytes_event=$(echo "$output" | grep "bytes/event" | awk '{print $2}')
+            peak_rss=$(/usr/bin/time -v ./bench --events=100000 --flush-latency=100ms --collections=$n 2>&1 | grep "Maximum resident" | awk '{print $NF}')
+            peak_mb=$(echo "scale=1; $peak_rss / 1024" | bc)
+            per_coll=$(echo "scale=0; $throughput / $n" | bc)
+            echo "| $n | ${peak_mb} MB | $bytes_event | ${per_coll}/s |"
+          done
+
+      - name: Turbopuffer published latencies (batch_size=1024)
+        run: |
+          echo "| percentile | write latency | throughput |"
+          echo "|------------|---------------|------------|"
+          for pair in "p50:165ms" "p90:248ms" "p99:850ms"; do
+            label=$(echo "$pair" | cut -d: -f1)
+            latency=$(echo "$pair" | cut -d: -f2)
+            result=$(./bench --events=100000 --flush-latency=$latency 2>&1 | grep "throughput")
+            throughput=$(echo "$result" | awk '{print $2, $3}')
+            echo "| $label | $latency | $throughput |"
+          done
