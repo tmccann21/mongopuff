@@ -8,7 +8,7 @@ import (
 
 func Execute() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: mongopuff <run|backfill>")
+		return errors.New("usage: mongopuff <run|backfill|dlq|validate|init>")
 	}
 
 	switch os.Args[1] {
@@ -16,6 +16,8 @@ func Execute() error {
 		return runCDC()
 	case "backfill":
 		return runBackfill()
+	case "dlq":
+		return runDLQ()
 	case "validate":
 		return runValidate()
 	case "init":
