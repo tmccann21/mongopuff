@@ -39,12 +39,19 @@ const (
 	VectorPrecisionI8  VectorPrecision = "i8"
 )
 
+type Embed struct {
+	Model      string `yaml:"model"`
+	Dimensions int    `yaml:"dimensions"`
+	Attribute  string `yaml:"attribute"`
+}
+
 type FieldMapping struct {
 	Name      string          `yaml:"name"`
 	Type      FieldType       `yaml:"type"`
 	Dimension int             `yaml:"dimension,omitempty"` // vector only
 	Precision VectorPrecision `yaml:"precision,omitempty"` // vector only
-	Filterable *bool           `yaml:"filterable,omitempty"`
+	Filterable *bool          `yaml:"filterable,omitempty"`
+	Embed      *Embed         `yaml:"embed,omitempty"`
 }
 
 type MappingConfig struct {

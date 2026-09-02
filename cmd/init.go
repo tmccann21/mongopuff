@@ -52,11 +52,18 @@ func promptYesNo(msg string, def bool) bool {
 	}
 }
 
+type embedPrompt struct {
+	model      string
+	dimensions int
+	attribute  string
+}
+
 type fieldPrompt struct {
 	name      string
 	fieldType string
 	dimension int
 	precision string
+	embed     *embedPrompt
 }
 
 type collectionPrompt struct {
@@ -112,6 +119,22 @@ func promptField() (fieldPrompt, error) {
 			}
 			fmt.Println("  Invalid precision. Valid options: f32, f16, i8")
 		}
+	}
+
+	if fieldType == "string" && promptYesNo("  Enable embedding?", false) {
+		model := prompt("  Embedding model (e.g. voyage/voyage-4): ")
+		var dims int
+		for {
+			s := prompt("  Embedding dimensions: ")
+			d, err := strconv.Atoi(s)
+			if err == nil && d > 0 {
+				dims = d
+				break
+			}
+			fmt.Println("  Dimensions must be a positive integer.")
+		}
+		attribute := promptDefault("  Vector attribute name", name+"_vector")
+		f.embed = &embedPrompt{model: model, dimensions: dims, attribute: attribute}
 	}
 
 	return f, nil
@@ -219,12 +242,20 @@ func writeConfigFile(path string, collections []collectionPrompt, global config.
 	for i, c := range collections {
 		fields := make([]config.FieldMapping, len(c.fields))
 		for j, f := range c.fields {
-			fields[j] = config.FieldMapping{
+			fm := config.FieldMapping{
 				Name:      f.name,
 				Type:      config.FieldType(f.fieldType),
 				Dimension: f.dimension,
 				Precision: config.VectorPrecision(f.precision),
 			}
+			if f.embed != nil {
+				fm.Embed = &config.Embed{
+					Model:      f.embed.model,
+					Dimensions: f.embed.dimensions,
+					Attribute:  f.embed.attribute,
+				}
+			}
+			fields[j] = fm
 		}
 
 		mirrorDeletes := c.mirrorDeletes
