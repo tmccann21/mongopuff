@@ -45,6 +45,7 @@ type CollectionState struct {
 	ChangeStreamResumeToken []byte    `bson:"changeStreamResumeToken,omitempty"`
 	BackfillCursor          any       `bson:"backfillCursor,omitempty"`
 	LastFlushTime           time.Time `bson:"lastFlushTime,omitempty"`
+	SpoolSegment            uint32    `bson:"spoolSegment,omitempty"`
 }
 
 // ChangeEvent represents a parsed MongoDB change stream event.
