@@ -18,7 +18,7 @@ func Open(dir string) (*Spool, error) {
 		return nil, err
 	}
 	return &Spool{
-		dir: dir
+		dir: dir,
 	}, nil
 }
 

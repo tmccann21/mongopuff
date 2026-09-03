@@ -83,6 +83,8 @@ func (c *CollectionConfig) EffectiveBackfillPageSize() int {
 type GlobalConfig struct {
 	BatchFlushCount  int `yaml:"batchFlushCount,omitempty"`
 	BatchFlushTimeMs int `yaml:"batchFlushTimeMs,omitempty"`
+	SpoolEnabled     bool `yaml:"spoolEnabled,omitempty"`
+	SpoolDir         string `yaml:"spoolDir,omitempty"`
 }
 
 type ConfigFile struct {
@@ -93,6 +95,7 @@ type ConfigFile struct {
 const (
 	DefaultBatchFlushCount  = 1024
 	DefaultBatchFlushTimeMs = 1000 // 1s
+	DefaultSpoolDir = "./data/spool"
 )
 
 func (g GlobalConfig) FlushInterval() time.Duration {

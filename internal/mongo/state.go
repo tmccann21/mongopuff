@@ -72,6 +72,12 @@ func (s *Store) SaveLastFlushTime(ctx context.Context, collection string, lastFl
 	return err
 }
 
+func (s *Store) SaveSpoolSegment(ctx context.Context, collection string, segment uint32) error {
+	coll := s.db.Collection(mongopuffStateCollection)
+	_, err := coll.UpdateOne(ctx, bson.M{"_id": collection}, bson.M{"$set": bson.M{"spoolSegment": segment}}, options.UpdateOne().SetUpsert(true))
+	return err
+}
+
 func (s *Store) LoadCollectionState(ctx context.Context, collection string) (CollectionState, error) {
 	coll := s.db.Collection(mongopuffStateCollection)
 
