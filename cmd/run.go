@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"github.com/tmccann21/mongopuff/internal/turbopuffer"
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
+
+	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 func runCDC() error {
@@ -157,6 +160,12 @@ func runCollectionCDC(ctx context.Context, cfg *config.AppConfig, store *mongo.S
 	}
 
 	if _, err := stream.Event(); err != nil {
+		var serverErr mongodriver.ServerError
+		if errors.As(err, &serverErr) && serverErr.HasErrorLabel("NonResumableChangeStreamError") {
+			slog.Error("oplog position lost: change stream is non-resumable, re-backfill required",
+				"collection", coll.Name, "error", err)
+			return fmt.Errorf("oplog position lost (re-backfill required): %w", err)
+		}
 		return fmt.Errorf("change stream error: %w", err)
 	}
 
