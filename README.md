@@ -28,7 +28,9 @@ mongopuff backfill --collection=<collection>
 This project was inspired by the work of the A24 team on [puffgres](https://github.com/a24films/puffgres). Plumbing between MongoDB -> turbopuffer was feeling tedious while experimenting and iterating quickly so in the spirit of [building the tools you need](https://www.youtube.com/watch?v=_GpBkplsGus) mongopuff was born.
 
 # Delivery
-mongopuff replication uses conditional writes in turbopuffer to perform effectively-once delivery. It maintains a change stream pointer to resume event processing in case of a loss of connection to MongoDB and a dead-letter queue to replay failed events in case of a service outage from turbopuffer.
+mongopuff replication uses conditional writes in turbopuffer to perform effectively-once delivery. It persists a change stream cursor to resume event processing after a crash and a dead-letter queue to replay failed writes during a turbopuffer outage.
+
+Under heavy write-load to MongoDB or degraded write performance from turbopuffer, the change stream cursor can drift from the head of the oplog. In extreme cases, the cursor can be evicted from the oplog window and mongopuff loses its position. This is unrecoverable and requires a full backfill. If your use case involves persistent high write-pressure, mongopuff can be run with a durable buffer on change stream reads. In this mode, mongopuff writes change events to disk before delivering to turbopuffer, allowing the consumer to keep pace with the oplog without blocking on network I/O.
 
 # Benchmarks
 The following benchmarks were measured on a single github action runner. Throughput was measured using an artificial
