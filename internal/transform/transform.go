@@ -26,6 +26,7 @@ const (
 type Action struct {
 	Type        ActionType
 	Operation   mongo.Operation // original MongoDB operation (insert, update, replace, delete)
+	Namespace   string
 	DocumentID  string
 	Attributes  map[string]any // field name → value
 	ClusterTime uint64
@@ -77,20 +78,32 @@ func SerializeClusterTime(t uint32, i uint32) uint64 {
 
 // MapChangeEvent converts a change stream event into a turbopuffer Action
 // according to the collection's field mapping config.
-func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	switch event.Operation {
 	case mongo.OpInsert, mongo.OpReplace:
-		return mapUpsert(event, coll)
+		action, err := mapUpsert(event, coll)
+		if err != nil {
+			return nil, err
+		}
+		return []Action{action}, nil
 	case mongo.OpUpdate:
-		return mapPatch(event, coll)
+		action, err := mapPatch(event, coll)
+		if err != nil {
+			return nil, err
+		}
+		return []Action{action}, nil
 	case mongo.OpDelete:
-		return mapDelete(event, coll)
+		action, err := mapDelete(event, coll)
+		if err != nil {
+			return nil, err
+		}
+		return []Action{action}, nil
 	case mongo.OpInvalidate:
-		return Action{}, fmt.Errorf("change stream invalidated: resume token is no longer valid, re-backfill required")
+		return nil, fmt.Errorf("change stream invalidated: resume token is no longer valid, re-backfill required")
 	case mongo.OpRename, mongo.OpDrop:
-		return Action{Type: ActionSkip}, nil
+		return []Action{{Type: ActionSkip}}, nil
 	default:
-		return Action{Type: ActionSkip}, nil
+		return []Action{{Type: ActionSkip}}, nil
 	}
 }
 
@@ -127,6 +140,7 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionUpsert,
+		Namespace:   coll.Mapping.Namespace,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
@@ -161,6 +175,7 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 
 	return Action{
 		Type:        ActionPatch,
+		Namespace:   coll.Mapping.Namespace,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
@@ -180,6 +195,7 @@ func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionDelete,
+		Namespace:   coll.Mapping.Namespace,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		ClusterTime: event.ClusterTime,

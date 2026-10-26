@@ -181,6 +181,7 @@ func TestMapChangeEvent_IDMissing(t *testing.T) {
 			t.Error("expected error for missing _id on delete event")
 		}
 	})
+
 }
 
 // --- Change Stream Event Mapping (TESTING.md §4) ---
@@ -206,7 +207,7 @@ func TestMapChangeEvent_Insert(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 	ct := SerializeClusterTime(10, 1)
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:    mongo.OpInsert,
 		DocumentID:   oid,
 		FullDocument: map[string]any{"name": "alice", "email": "a@b.com", "age": 30},
@@ -216,6 +217,7 @@ func TestMapChangeEvent_Insert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionUpsert {
 		t.Fatalf("got action type %d, want ActionUpsert", action.Type)
 	}
@@ -240,7 +242,7 @@ func TestMapChangeEvent_Replace(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 	ct := SerializeClusterTime(10, 2)
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:    mongo.OpReplace,
 		DocumentID:   oid,
 		FullDocument: map[string]any{"name": "bob", "email": "b@c.com"},
@@ -250,6 +252,7 @@ func TestMapChangeEvent_Replace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionUpsert {
 		t.Fatalf("got action type %d, want ActionUpsert", action.Type)
 	}
@@ -264,7 +267,7 @@ func TestMapChangeEvent_Replace(t *testing.T) {
 func TestMapChangeEvent_UpdateMappedFields(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:     mongo.OpUpdate,
 		DocumentID:    oid,
 		UpdatedFields: map[string]any{"name": "carol", "age": 31},
@@ -274,6 +277,7 @@ func TestMapChangeEvent_UpdateMappedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionPatch {
 		t.Fatalf("got action type %d, want ActionPatch", action.Type)
 	}
@@ -291,7 +295,7 @@ func TestMapChangeEvent_UpdateMappedFields(t *testing.T) {
 func TestMapChangeEvent_UpdateUnmappedFieldsOnly(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:     mongo.OpUpdate,
 		DocumentID:    oid,
 		UpdatedFields: map[string]any{"age": 32, "phone": "555-1234"},
@@ -301,6 +305,7 @@ func TestMapChangeEvent_UpdateUnmappedFieldsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionSkip {
 		t.Errorf("got action type %d, want ActionSkip", action.Type)
 	}
@@ -309,7 +314,7 @@ func TestMapChangeEvent_UpdateUnmappedFieldsOnly(t *testing.T) {
 func TestMapChangeEvent_UpdateFieldRemoved(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:     mongo.OpUpdate,
 		DocumentID:    oid,
 		RemovedFields: []string{"email"},
@@ -319,6 +324,7 @@ func TestMapChangeEvent_UpdateFieldRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionPatch {
 		t.Fatalf("got action type %d, want ActionPatch", action.Type)
 	}
@@ -334,7 +340,7 @@ func TestMapChangeEvent_UpdateFieldRemoved(t *testing.T) {
 func TestMapChangeEvent_Delete(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:   mongo.OpDelete,
 		DocumentID:  oid,
 		ClusterTime: SerializeClusterTime(10, 6),
@@ -343,6 +349,7 @@ func TestMapChangeEvent_Delete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionDelete {
 		t.Fatalf("got action type %d, want ActionDelete", action.Type)
 	}
@@ -354,7 +361,7 @@ func TestMapChangeEvent_Delete(t *testing.T) {
 func TestMapChangeEvent_DeleteMirrorDisabled(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:   mongo.OpDelete,
 		DocumentID:  oid,
 		ClusterTime: SerializeClusterTime(10, 7),
@@ -363,6 +370,7 @@ func TestMapChangeEvent_DeleteMirrorDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionSkip {
 		t.Errorf("got action type %d, want ActionSkip when mirrorDeletes is false", action.Type)
 	}
@@ -380,7 +388,7 @@ func TestMapChangeEvent_Invalidate(t *testing.T) {
 }
 
 func TestMapChangeEvent_Rename(t *testing.T) {
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:   mongo.OpRename,
 		ClusterTime: SerializeClusterTime(10, 9),
 	}, testColl(testFields, nil))
@@ -388,13 +396,14 @@ func TestMapChangeEvent_Rename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionSkip {
 		t.Errorf("got action type %d, want ActionSkip for rename", action.Type)
 	}
 }
 
 func TestMapChangeEvent_Drop(t *testing.T) {
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:   mongo.OpDrop,
 		ClusterTime: SerializeClusterTime(10, 10),
 	}, testColl(testFields, nil))
@@ -402,6 +411,7 @@ func TestMapChangeEvent_Drop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionSkip {
 		t.Errorf("got action type %d, want ActionSkip for drop", action.Type)
 	}
@@ -862,7 +872,7 @@ func TestMapChangeEvent_PatchCoercesFloat(t *testing.T) {
 		{Name: "calories", Type: config.FieldTypeFloat},
 	}
 
-	action, err := MapChangeEvent(mongo.ChangeEvent{
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
 		Operation:     mongo.OpUpdate,
 		DocumentID:    oid,
 		UpdatedFields: map[string]any{"calories": int32(400)},
@@ -872,6 +882,7 @@ func TestMapChangeEvent_PatchCoercesFloat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	action := actions[0]
 	if action.Type != ActionPatch {
 		t.Fatalf("got action type %d, want ActionPatch", action.Type)
 	}

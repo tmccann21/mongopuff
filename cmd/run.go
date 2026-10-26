@@ -100,7 +100,7 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 			"clockTime", time.Now(),
 		)
 
-		action, err := transform.MapChangeEvent(event, coll)
+		actions, err := transform.MapChangeEvent(event, coll)
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "error", err)
 			docID, idErr := transform.SerializeID(event.DocumentID)
@@ -124,8 +124,10 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 			continue
 		}
 
-		if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
-			return fmt.Errorf("batch flush failed: %w", err)
+		for _, action := range actions {
+			if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
+				return fmt.Errorf("batch flush failed: %w", err)
+			}
 		}
 	}
 

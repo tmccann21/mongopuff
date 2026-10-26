@@ -170,16 +170,18 @@ func runCollection(ctx context.Context, index int, numEvents int) collectionResu
 		event := buildEvent(i)
 
 		tStart := time.Now()
-		action, err := transform.MapChangeEvent(event, collCfg)
+		actions, err := transform.MapChangeEvent(event, collCfg)
 		result.transformTime += time.Since(tStart)
 
 		if err != nil {
 			continue
 		}
 
-		if err := batcher.Add(ctx, action, resumeToken); err != nil {
-			fmt.Fprintf(os.Stderr, "batcher error: %v\n", err)
-			break
+		for _, action := range actions {
+			if err := batcher.Add(ctx, action, resumeToken); err != nil {
+				fmt.Fprintf(os.Stderr, "batcher error: %v\n", err)
+				break
+			}
 		}
 		result.events++
 	}
