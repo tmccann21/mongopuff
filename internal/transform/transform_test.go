@@ -184,6 +184,192 @@ func TestMapChangeEvent_IDMissing(t *testing.T) {
 
 }
 
+// --- Dynamic Namespace Resolution ---
+
+func testDynColl(fields []config.FieldMapping) config.CollectionConfig {
+	return config.CollectionConfig{
+		Name: "events",
+		Mapping: config.MappingConfig{
+			Namespace: "events_{{tenant}}",
+			Fields:    fields,
+		},
+	}
+}
+
+var dynTestFields = []config.FieldMapping{
+	{Name: "tenant", Type: config.FieldTypeString},
+	{Name: "name", Type: config.FieldTypeString},
+}
+
+// Insert: namespace resolved from fullDocument.
+func TestMapChangeEvent_DynamicNamespace_InsertResolvesFromFullDocument(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:    mongo.OpInsert,
+		DocumentID:   oid,
+		FullDocument: map[string]any{"tenant": "acme", "name": "alice"},
+		ClusterTime:  SerializeClusterTime(10, 1),
+	}, testDynColl(dynTestFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionUpsert {
+		t.Fatalf("got action type %d, want ActionUpsert", action.Type)
+	}
+	if action.Namespace != "events_acme" {
+		t.Errorf("got namespace %q, want %q", action.Namespace, "events_acme")
+	}
+	if action.DocumentID != "507f1f77bcf86cd799439011" {
+		t.Errorf("got document ID %q, want %q", action.DocumentID, "507f1f77bcf86cd799439011")
+	}
+}
+
+// Replace: namespace resolved from fullDocument.
+func TestMapChangeEvent_DynamicNamespace_ReplaceResolvesFromFullDocument(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:    mongo.OpReplace,
+		DocumentID:   oid,
+		FullDocument: map[string]any{"tenant": "beta", "name": "bob"},
+		ClusterTime:  SerializeClusterTime(10, 2),
+	}, testDynColl(dynTestFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionUpsert {
+		t.Fatalf("got action type %d, want ActionUpsert", action.Type)
+	}
+	if action.Namespace != "events_beta" {
+		t.Errorf("got namespace %q, want %q", action.Namespace, "events_beta")
+	}
+	if action.DocumentID != "507f1f77bcf86cd799439011" {
+		t.Errorf("got document ID %q, want %q", action.DocumentID, "507f1f77bcf86cd799439011")
+	}
+}
+
+// Update (non-transition): namespace resolved from fullDocument (post-image).
+// FullDocumentBeforeChange is nil — if the implementation reads from it instead
+// of FullDocument, namespace resolution will fail and the test will catch it.
+func TestMapChangeEvent_DynamicNamespace_UpdateResolvesFromFullDocument(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:                mongo.OpUpdate,
+		DocumentID:               oid,
+		FullDocument:             map[string]any{"tenant": "acme", "name": "carol"},
+		FullDocumentBeforeChange: nil,
+		UpdatedFields:            map[string]any{"name": "carol"},
+		ClusterTime:              SerializeClusterTime(10, 3),
+	}, testDynColl(dynTestFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action for non-transition update, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Namespace != "events_acme" {
+		t.Errorf("got namespace %q, want %q", action.Namespace, "events_acme")
+	}
+}
+
+// Delete: namespace resolved from fullDocumentBeforeChange, not fullDocument.
+func TestMapChangeEvent_DynamicNamespace_DeleteResolvesFromFullDocumentBeforeChange(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	// For deletes, MongoDB does not provide fullDocument.
+	// The namespace must come from fullDocumentBeforeChange.
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:                mongo.OpDelete,
+		DocumentID:               oid,
+		FullDocumentBeforeChange: map[string]any{"tenant": "acme", "name": "alice"},
+		ClusterTime:              SerializeClusterTime(10, 4),
+	}, testDynColl(dynTestFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	action := actions[0]
+	if action.Type != ActionDelete {
+		t.Fatalf("got action type %d, want ActionDelete", action.Type)
+	}
+	if action.Namespace != "events_acme" {
+		t.Errorf("got namespace %q, want %q", action.Namespace, "events_acme")
+	}
+}
+
+// Namespace transition: update that modifies the namespace field produces two actions.
+// First: delete targeting the old namespace (resolved from fullDocumentBeforeChange).
+// Second: upsert targeting the new namespace (resolved from fullDocument).
+func TestMapChangeEvent_DynamicNamespace_TransitionProducesTwoActions(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	actions, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:                mongo.OpUpdate,
+		DocumentID:               oid,
+		FullDocument:             map[string]any{"tenant": "beta", "name": "alice"},
+		FullDocumentBeforeChange: map[string]any{"tenant": "acme", "name": "alice"},
+		UpdatedFields:            map[string]any{"tenant": "beta"},
+		ClusterTime:              SerializeClusterTime(10, 6),
+	}, testDynColl(dynTestFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions for namespace transition, got %d", len(actions))
+	}
+
+	del := actions[0]
+	if del.Type != ActionDelete {
+		t.Errorf("actions[0]: got type %d, want ActionDelete", del.Type)
+	}
+	if del.Namespace != "events_acme" {
+		t.Errorf("actions[0]: got namespace %q, want %q (old namespace from fullDocumentBeforeChange)", del.Namespace, "events_acme")
+	}
+	if del.DocumentID != "507f1f77bcf86cd799439011" {
+		t.Errorf("actions[0]: got document ID %q, want %q", del.DocumentID, "507f1f77bcf86cd799439011")
+	}
+
+	ups := actions[1]
+	if ups.Type != ActionUpsert {
+		t.Errorf("actions[1]: got type %d, want ActionUpsert", ups.Type)
+	}
+	if ups.Namespace != "events_beta" {
+		t.Errorf("actions[1]: got namespace %q, want %q (new namespace from fullDocument)", ups.Namespace, "events_beta")
+	}
+	if ups.DocumentID != "507f1f77bcf86cd799439011" {
+		t.Errorf("actions[1]: got document ID %q, want %q", ups.DocumentID, "507f1f77bcf86cd799439011")
+	}
+}
+
+// Missing namespace field on insert returns an error — caller routes to DLQ.
+func TestMapChangeEvent_DynamicNamespace_MissingFieldReturnsError(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	// fullDocument does not contain "tenant", so the namespace cannot be resolved.
+	_, err := MapChangeEvent(mongo.ChangeEvent{
+		Operation:    mongo.OpInsert,
+		DocumentID:   oid,
+		FullDocument: map[string]any{"name": "alice"}, // tenant absent
+		ClusterTime:  SerializeClusterTime(10, 5),
+	}, testDynColl(dynTestFields))
+	if err == nil {
+		t.Fatal("expected error when namespace field is absent, got nil")
+	}
+}
+
 // --- Change Stream Event Mapping (TESTING.md §4) ---
 
 func testColl(fields []config.FieldMapping, mirrorDeletes *bool) config.CollectionConfig {
