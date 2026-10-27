@@ -87,11 +87,7 @@ func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Ac
 		}
 		return []Action{action}, nil
 	case mongo.OpUpdate:
-		action, err := mapPatch(event, coll)
-		if err != nil {
-			return nil, err
-		}
-		return []Action{action}, nil
+		return mapUpdate(event, coll)
 	case mongo.OpDelete:
 		action, err := mapDelete(event, coll)
 		if err != nil {
@@ -133,6 +129,11 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 		return Action{}, err
 	}
 
+	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	if err != nil {
+		return Action{}, err
+	}
+
 	attrs, err := extractFields(event.FullDocument, coll.Mapping.Fields)
 	if err != nil {
 		return Action{}, err
@@ -140,12 +141,67 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionUpsert,
-		Namespace:   coll.Mapping.Namespace,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: event.ClusterTime,
 	}, nil
+}
+
+// mapUpdate handles OpUpdate events. When the namespace is dynamic and a pre-image
+// is available, it checks whether the namespace field changed. If it did, a namespace
+// transition is detected and two actions are returned: a delete from the old namespace
+// followed by an upsert into the new namespace. Otherwise the event is a normal patch.
+func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	if IsDynamic(coll.Mapping.Namespace) && event.FullDocumentBeforeChange != nil {
+		oldNS, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
+		if err != nil {
+			return nil, err
+		}
+		newNS, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+		if err != nil {
+			return nil, err
+		}
+		if oldNS != newNS {
+			return mapNamespaceTransition(event, coll, oldNS, newNS)
+		}
+	}
+
+	action, err := mapPatch(event, coll)
+	if err != nil {
+		return nil, err
+	}
+	return []Action{action}, nil
+}
+
+func mapNamespaceTransition(event mongo.ChangeEvent, coll config.CollectionConfig, oldNS, newNS string) ([]Action, error) {
+	docID, err := SerializeID(event.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+
+	attrs, err := extractFields(event.FullDocument, coll.Mapping.Fields)
+	if err != nil {
+		return nil, err
+	}
+
+	del := Action{
+		Type:        ActionDelete,
+		Namespace:   oldNS,
+		Operation:   event.Operation,
+		DocumentID:  docID,
+		ClusterTime: event.ClusterTime,
+	}
+	ups := Action{
+		Type:        ActionUpsert,
+		Namespace:   newNS,
+		Operation:   event.Operation,
+		DocumentID:  docID,
+		Attributes:  attrs,
+		ClusterTime: event.ClusterTime,
+	}
+	return []Action{del, ups}, nil
 }
 
 func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
@@ -173,9 +229,14 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 		return Action{Type: ActionSkip}, nil
 	}
 
+	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	if err != nil {
+		return Action{}, err
+	}
+
 	return Action{
 		Type:        ActionPatch,
-		Namespace:   coll.Mapping.Namespace,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
@@ -193,9 +254,14 @@ func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 		return Action{}, err
 	}
 
+	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
+	if err != nil {
+		return Action{}, err
+	}
+
 	return Action{
 		Type:        ActionDelete,
-		Namespace:   coll.Mapping.Namespace,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		ClusterTime: event.ClusterTime,
