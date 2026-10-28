@@ -179,6 +179,42 @@ func TestBatchDedupInsertThenDelete(t *testing.T) {
 	}
 }
 
+func TestBatchDedupKeyIncludesNamespace(t *testing.T) {
+	spy := &flushSpy{}
+	cfg := testConfig(9999, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
+
+	// A namespace transition emits a delete from the old namespace and an
+	// upsert into the new one for the same document. Deduping on DocumentID
+	// alone would drop the delete and leave a stale copy in the old namespace.
+	del := deleteAction("a")
+	del.Namespace = "tenant-old"
+	ups := upsertAction("a", map[string]any{"v": 1})
+	ups.Namespace = "tenant-new"
+
+	if err := b.Add(context.Background(), del, []byte("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Add(context.Background(), ups, []byte("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	actions := spy.lastCall().actions
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions (one per namespace), got %d", len(actions))
+	}
+	if actions[0].Namespace != "tenant-old" || actions[0].Type != transform.ActionDelete {
+		t.Errorf("actions[0] = %s/%d, want tenant-old/ActionDelete", actions[0].Namespace, actions[0].Type)
+	}
+	if actions[1].Namespace != "tenant-new" || actions[1].Type != transform.ActionUpsert {
+		t.Errorf("actions[1] = %s/%d, want tenant-new/ActionUpsert", actions[1].Namespace, actions[1].Type)
+	}
+}
+
 func TestBatchEmptyNoFlush(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)

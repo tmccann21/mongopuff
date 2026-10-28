@@ -25,12 +25,26 @@ type mockTpuf struct {
 	mu    sync.Mutex
 	calls []writeBatchCall
 	errs  []error // if non-nil, shift and return; otherwise nil
+
+	// hook, if set, runs at the start of every Write without holding mu. Its
+	// error is returned in place of errs. Partition tests use it to fail, block,
+	// or rendezvous specific namespaces, since the order of concurrent partition
+	// writes is nondeterministic.
+	hook func(ctx context.Context, namespace string) error
 }
 
 func (m *mockTpuf) Write(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
+	var hookErr error
+	if m.hook != nil {
+		hookErr = m.hook(ctx, namespace)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, writeBatchCall{namespace: namespace, actions: actions})
+	if hookErr != nil {
+		return hookErr
+	}
 	if len(m.errs) > 0 {
 		err := m.errs[0]
 		m.errs = m.errs[1:]
@@ -56,6 +70,27 @@ func (m *mockTpuf) getCalls() []writeBatchCall {
 type noopDLQ struct{}
 
 func (noopDLQ) Write(_ context.Context, _ mongo.DLQEntry) error { return nil }
+
+type recordingDLQ struct {
+	mu      sync.Mutex
+	entries []mongo.DLQEntry
+	err     error // returned from every Write, after the entry is recorded
+}
+
+func (d *recordingDLQ) Write(_ context.Context, entry mongo.DLQEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.entries = append(d.entries, entry)
+	return d.err
+}
+
+func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dst := make([]mongo.DLQEntry, len(d.entries))
+	copy(dst, d.entries)
+	return dst
+}
 
 // --- helpers ---
 
