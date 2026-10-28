@@ -10,11 +10,12 @@ import (
 )
 
 type changeStreamEvent struct {
-	OperationType     string             `bson:"operationType"`
-	DocumentKey       bson.M             `bson:"documentKey"`
-	FullDocument      bson.M             `bson:"fullDocument"`
-	UpdateDescription *updateDescription `bson:"updateDescription"`
-	ClusterTime       bson.Timestamp     `bson:"clusterTime"`
+	OperationType            string             `bson:"operationType"`
+	DocumentKey              bson.M             `bson:"documentKey"`
+	FullDocument             bson.M             `bson:"fullDocument"`
+	FullDocumentBeforeChange bson.M             `bson:"fullDocumentBeforeChange"`
+	UpdateDescription        *updateDescription `bson:"updateDescription"`
+	ClusterTime              bson.Timestamp     `bson:"clusterTime"`
 }
 
 type updateDescription struct {
@@ -31,13 +32,10 @@ type LiveChangeStream struct {
 
 // OpenChangeStream opens a change stream on the given collection.
 // If resumeToken is non-nil, the stream resumes from that token.
-func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte) (*LiveChangeStream, error) {
-	opts := options.ChangeStream().
-		SetFullDocument(options.UpdateLookup)
-
-	if resumeToken != nil {
-		opts.SetResumeAfter(bson.Raw(resumeToken))
-	}
+// If preImages is true, update and delete events carry fullDocumentBeforeChange
+// when the collection has changeStreamPreAndPostImages enabled.
+func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte, preImages bool) (*LiveChangeStream, error) {
+	opts := changeStreamOptions(resumeToken, preImages)
 
 	cs, err := db.Collection(collection).Watch(ctx, mongo.Pipeline{}, opts)
 	if err != nil {
@@ -45,6 +43,21 @@ func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string
 	}
 
 	return &LiveChangeStream{cs: cs}, nil
+}
+
+func changeStreamOptions(resumeToken []byte, preImages bool) *options.ChangeStreamOptionsBuilder {
+	opts := options.ChangeStream().
+		SetFullDocument(options.UpdateLookup)
+
+	if preImages {
+		opts.SetFullDocumentBeforeChange(options.WhenAvailable)
+	}
+
+	if resumeToken != nil {
+		opts.SetResumeAfter(bson.Raw(resumeToken))
+	}
+
+	return opts
 }
 
 func (l *LiveChangeStream) Next(ctx context.Context) bool {
@@ -67,6 +80,10 @@ func (l *LiveChangeStream) Next(ctx context.Context) bool {
 
 	if raw.FullDocument != nil {
 		l.current.FullDocument = anyMap(raw.FullDocument)
+	}
+
+	if raw.FullDocumentBeforeChange != nil {
+		l.current.FullDocumentBeforeChange = anyMap(raw.FullDocumentBeforeChange)
 	}
 
 	if raw.UpdateDescription != nil {

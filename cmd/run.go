@@ -35,6 +35,10 @@ func runCDC() error {
 	}
 	defer store.Close(context.Background())
 
+	if err := checkPreImages(ctx, store, cfg.Collections); err != nil {
+		return fmt.Errorf("pre-image check: %w", err)
+	}
+
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
 		"database", store.DatabaseName(),
@@ -156,7 +160,7 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken)
+	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, transform.IsDynamic(coll.Mapping.Namespace))
 	if err != nil {
 		return err
 	}
@@ -198,7 +202,7 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken)
+	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, transform.IsDynamic(coll.Mapping.Namespace))
 	if err != nil {
 		return err
 	}

@@ -92,8 +92,15 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 	return cs, nil
 }
 
-func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte) (*LiveChangeStream, error) {
-	return OpenChangeStream(ctx, s.db, collection, resumeToken)
+func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, preImages bool) (*LiveChangeStream, error) {
+	return OpenChangeStream(ctx, s.db, collection, resumeToken, preImages)
+}
+
+// ListCollectionSpecifications returns the listCollections entries for the
+// named collections. Names that do not exist are absent from the result.
+func (s *Store) ListCollectionSpecifications(ctx context.Context, names []string) ([]mongo.CollectionSpecification, error) {
+	filter := bson.D{{Key: "name", Value: bson.D{{Key: "$in", Value: names}}}}
+	return s.db.ListCollectionSpecifications(ctx, filter)
 }
 
 func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
