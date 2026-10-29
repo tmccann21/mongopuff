@@ -96,14 +96,24 @@ func runBackfill() error {
 }
 
 // backfillPage maps one scanned page to upserts stamped with opTime and writes
-// them with one turbopuffer call per resolved namespace. The caller saves the
-// backfill cursor only on a nil return.
+// them with one turbopuffer call per resolved namespace. A document that fails
+// to transform is DLQ'd and the rest of the page is still written. The caller
+// saves the backfill cursor only on a nil return.
+//
+// Failed documents are DLQ'd before anything is written to turbopuffer, so an
+// unavailable DLQ fails the page without spending writes on it.
 func backfillPage(ctx context.Context, w *writer.Writer, dlq mongo.DLQWriter, schema map[string]tpuf.AttributeSchemaConfigParam, coll config.CollectionConfig, docs []map[string]any, opTime uint64) error {
 	actions := make([]transform.Action, 0, len(docs))
 	for _, doc := range docs {
 		action, err := transform.MapDocument(doc, opTime, coll)
 		if err != nil {
-			return fmt.Errorf("map document: %w", err)
+			slog.Error("transform error", "collection", coll.Name, "documentId", doc["_id"], "error", err)
+			// action is zero on error; OpInsert matches what MapDocument stamps on success.
+			entry := transformFailureEntry(coll.Name, doc["_id"], mongo.OpInsert, opTime, err)
+			if err := dlq.Write(ctx, entry); err != nil {
+				return fmt.Errorf("DLQ write for document %v: %w", doc["_id"], err)
+			}
+			continue
 		}
 		actions = append(actions, action)
 	}

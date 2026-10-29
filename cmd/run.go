@@ -107,22 +107,8 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 		actions, err := transform.MapChangeEvent(event, coll)
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "error", err)
-			docID, idErr := transform.SerializeID(event.DocumentID)
-			errKind := mongo.ErrTypeMismatch
-			if idErr != nil {
-				docID = fmt.Sprintf("%v", event.DocumentID)
-				errKind = mongo.ErrIDMissing
-			}
-			err = dlqWriter.Write(ctx, mongo.DLQEntry{
-				Collection:   coll.Name,
-				DocumentID:   docID,
-				Operation:    event.Operation,
-				ErrorKind:    errKind,
-				ErrorMessage: err.Error(),
-				ClusterTime:  event.ClusterTime,
-				CreatedAt:    time.Now(),
-			})
-			if err != nil {
+			entry := transformFailureEntry(coll.Name, event.DocumentID, event.Operation, event.ClusterTime, err)
+			if err := dlqWriter.Write(ctx, entry); err != nil {
 				slog.Error("DLQ write error", "collection", coll.Name, "error", err)
 			}
 			continue
@@ -147,6 +133,28 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 		return fmt.Errorf("change stream error: %w", err)
 	}
 	return nil
+}
+
+// transformFailureEntry builds the DLQ entry for a document that could not be
+// transformed. The change stream and backfill share it so that a failure is
+// classified the same way on both paths.
+func transformFailureEntry(collection string, id any, op mongo.Operation, clusterTime uint64, transformErr error) mongo.DLQEntry {
+	docID, idErr := transform.SerializeID(id)
+	errKind := mongo.ErrTypeMismatch
+	if idErr != nil {
+		// Fall back to the printed _id so an operator can still find the document.
+		docID = fmt.Sprintf("%v", id)
+		errKind = mongo.ErrIDMissing
+	}
+	return mongo.DLQEntry{
+		Collection:   collection,
+		DocumentID:   docID,
+		Operation:    op,
+		ErrorKind:    errKind,
+		ErrorMessage: transformErr.Error(),
+		ClusterTime:  clusterTime,
+		CreatedAt:    time.Now(),
+	}
 }
 
 // runCollectionCDCDirect is the default path: change stream → batcher → turbopuffer.
