@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -359,6 +360,56 @@ func TestBatchFlushErrorPropagated(t *testing.T) {
 	err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok"))
 	if !errors.Is(err, flushErr) {
 		t.Errorf("expected flush error, got %v", err)
+	}
+}
+
+func TestBatchTimerFlushFailureDoesNotLoseActions(t *testing.T) {
+	// A failed timer flush has no caller to return its error to. If the batcher
+	// drops the batch and carries on, the next successful flush saves a later
+	// resume token, and a restart never replays the dropped events.
+	ctx := context.Background()
+	failed := make(chan struct{})
+
+	var mu sync.Mutex
+	calls := 0
+	delivered := map[string]bool{} // document IDs from successful flushes
+	var savedTokens []string       // resume tokens from successful flushes
+
+	b := New(ctx, testConfig(9999, 20), func(_ context.Context, actions []transform.Action, resumeToken []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			close(failed)
+			return errors.New("write failed")
+		}
+		for _, a := range actions {
+			delivered[a.DocumentID] = true
+		}
+		savedTokens = append(savedTokens, string(resumeToken))
+		return nil
+	})
+	defer b.Close(ctx)
+
+	if err := b.Add(ctx, []transform.Action{smallUpsert("a")}, []byte("tok-a")); err != nil {
+		t.Fatalf("Add(a): %v", err)
+	}
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer flush did not fire")
+	}
+
+	addErr := b.Add(ctx, []transform.Action{smallUpsert("b")}, []byte("tok-b"))
+	flushErr := b.Flush(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if slices.Contains(savedTokens, "tok-b") && !delivered["a"] {
+		t.Errorf("saved resume token %q without delivering %q from the failed timer flush", "tok-b", "a")
+	}
+	if !delivered["a"] && addErr == nil && flushErr == nil {
+		t.Error("failed timer flush was neither retried nor reported by a later Add or Flush")
 	}
 }
 

@@ -28,6 +28,35 @@ func TestWriteRead_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestWrite_DoesNotOverwriteExistingSegment(t *testing.T) {
+	// A segment on disk may hold the only copy of events whose resume token is
+	// already saved. If the next segment number is ever reused, for example
+	// after a failed SaveSpoolSegment and a restart, replacing the file would
+	// lose them. Write must refuse instead.
+	sp, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sp.Close()
+
+	if err := sp.Write(1, []byte("first")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	err = sp.Write(1, []byte("second"))
+	if !errors.Is(err, os.ErrExist) {
+		t.Errorf("second Write(1) error = %v, want it to wrap os.ErrExist", err)
+	}
+
+	got, err := sp.Read(1)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != "first" {
+		t.Errorf("Read = %q, want %q", got, "first")
+	}
+}
+
 func TestRead_NotExist(t *testing.T) {
 	sp, err := Open(t.TempDir())
 	if err != nil {

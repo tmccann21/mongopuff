@@ -3,7 +3,9 @@ package writer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -290,7 +292,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 		t.Fatalf("got %d WriteBatch calls, want 2", mock.callCount())
 	}
 
-	// Both segments should be removed regardless of error.
+	// The failed write went to the DLQ, so segment 0 is handled and removed.
 	segs, err := sp.Segments()
 	if err != nil {
 		t.Fatalf("Segments: %v", err)
@@ -298,6 +300,149 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	if len(segs) != 0 {
 		t.Errorf("segments remaining: %v, want none", segs)
 	}
+}
+
+// ctxDLQ fails every Write once ctx is done, as the MongoDB driver does.
+type ctxDLQ struct{}
+
+func (ctxDLQ) Write(ctx context.Context, _ mongo.DLQEntry) error { return ctx.Err() }
+
+// assertSegmentsOnDisk fails unless every segment in want is still in the spool.
+func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {
+	t.Helper()
+	segs, err := sp.Segments()
+	if err != nil {
+		t.Fatalf("Segments: %v", err)
+	}
+	for _, seg := range want {
+		if !slices.Contains(segs, seg) {
+			t.Errorf("segment %d was removed (segments on disk: %v)", seg, segs)
+		}
+	}
+}
+
+// The resume token for a spooled segment is saved when the segment is written,
+// so the segment file is the only copy of its events. Delivery may remove it
+// only once it has been written to turbopuffer or the DLQ, and must not deliver
+// later segments first: deletes are unconditional, so retrying an older upsert
+// after a newer delete would bring a deleted document back.
+
+func TestRunSpoolDelivery_KeepsUndeliverableSegment(t *testing.T) {
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+	defer sp.Close()
+
+	writeSegment(t, sp, 0, makeActions("doc-fail"))
+	writeSegment(t, sp, 1, makeActions("doc-later"))
+
+	mock := &mockTpuf{hook: func(context.Context, string) error {
+		return errors.New("turbopuffer unavailable")
+	}}
+	dlq := &recordingDLQ{err: errors.New("dlq unavailable")}
+	w := New(mock, dlq)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return len(dlq.getEntries()) >= 1 }, 2*time.Second)
+	cancel()
+	<-done
+
+	assertSegmentsOnDisk(t, sp, 0, 1)
+	for _, call := range mock.getCalls() {
+		if call.actions[0].DocumentID == "doc-later" {
+			t.Error("delivered segment 1 before segment 0 was written or DLQ'd")
+		}
+	}
+}
+
+func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
+	// Shutdown cancels ctx while a delivery is in flight, which fails both the
+	// turbopuffer write and the DLQ fallback. That segment must survive for the
+	// next run to deliver.
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+	defer sp.Close()
+
+	writeSegment(t, sp, 0, makeActions("doc-0"))
+
+	inFlight := make(chan struct{})
+	var once sync.Once
+	mock := &mockTpuf{hook: func(ctx context.Context, _ string) error {
+		once.Do(func() { close(inFlight) })
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	w := New(mock, ctxDLQ{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
+		close(done)
+	}()
+
+	select {
+	case <-inFlight:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery never started")
+	}
+	cancel()
+	<-done
+
+	assertSegmentsOnDisk(t, sp, 0)
+}
+
+func TestRunSpoolDelivery_StopsAtCorruptSegment(t *testing.T) {
+	// A segment that cannot be decoded cannot be delivered, and skipping it
+	// delivers later segments out of order and strands its events.
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+	defer sp.Close()
+
+	if err := sp.Write(0, []byte("not json")); err != nil {
+		t.Fatalf("spool.Write(0): %v", err)
+	}
+	writeSegment(t, sp, 1, makeActions("doc-later"))
+
+	mock := &mockTpuf{}
+	w := New(mock, noopDLQ{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
+		close(done)
+	}()
+
+	// Either delivery stops on its own, or it is still blocked on segment 0.
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		cancel()
+		<-done
+	}
+
+	if n := mock.callCount(); n != 0 {
+		t.Errorf("got %d turbopuffer calls, want 0: segment 1 was delivered past corrupt segment 0", n)
+	}
+	assertSegmentsOnDisk(t, sp, 0, 1)
 }
 
 func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {

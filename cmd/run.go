@@ -88,7 +88,14 @@ func runCDC() error {
 	return nil
 }
 
-func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
+// changeStream is the part of *mongo.LiveChangeStream that consumeStream uses.
+type changeStream interface {
+	Next(ctx context.Context) bool
+	Event() (mongo.ChangeEvent, error)
+	ResumeToken() []byte
+}
+
+func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
 	for stream.Next(ctx) {
 		event, err := stream.Event()
 		if err != nil {
