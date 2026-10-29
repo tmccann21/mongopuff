@@ -370,6 +370,51 @@ func TestMapChangeEvent_DynamicNamespace_MissingFieldReturnsError(t *testing.T) 
 	}
 }
 
+// Backfill actions are partitioned by Namespace like CDC actions, so an action
+// left without one would be written to an empty namespace.
+func TestMapDocument_ResolvesNamespace(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	tests := []struct {
+		name string
+		coll config.CollectionConfig
+		want string
+	}{
+		{
+			name: "static",
+			coll: config.CollectionConfig{
+				Name:    "events",
+				Mapping: config.MappingConfig{Namespace: "events", Fields: dynTestFields},
+			},
+			want: "events",
+		},
+		{
+			name: "dynamic",
+			coll: testDynColl(dynTestFields),
+			want: "events_acme",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := map[string]any{"_id": oid, "tenant": "acme", "name": "alice"}
+			action, err := MapDocument(doc, SerializeClusterTime(10, 1), tt.coll)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action.Namespace != tt.want {
+				t.Errorf("got namespace %q, want %q", action.Namespace, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapDocument_DynamicNamespaceMissingFieldReturnsError(t *testing.T) {
+	doc := map[string]any{"_id": mustObjectID("507f1f77bcf86cd799439011"), "name": "alice"} // tenant absent
+	if _, err := MapDocument(doc, SerializeClusterTime(10, 1), testDynColl(dynTestFields)); err == nil {
+		t.Fatal("expected error when namespace field is absent, got nil")
+	}
+}
+
 // --- Change Stream Event Mapping (TESTING.md §4) ---
 
 func testColl(fields []config.FieldMapping, mirrorDeletes *bool) config.CollectionConfig {

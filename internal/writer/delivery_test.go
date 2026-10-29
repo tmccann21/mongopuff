@@ -110,6 +110,7 @@ func makeActions(docID string) []transform.Action {
 		{
 			Type:        transform.ActionUpsert,
 			Operation:   mongo.OpInsert,
+			Namespace:   "test-ns",
 			DocumentID:  docID,
 			Attributes:  map[string]any{"name": docID},
 			ClusterTime: 1,

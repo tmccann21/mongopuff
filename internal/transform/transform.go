@@ -109,6 +109,11 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 		return Action{}, err
 	}
 
+	ns, err := ResolveNamespace(coll.Mapping.Namespace, doc)
+	if err != nil {
+		return Action{}, err
+	}
+
 	attrs, err := extractFields(doc, coll.Mapping.Fields)
 	if err != nil {
 		return Action{}, err
@@ -117,6 +122,7 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 	return Action{
 		Type:        ActionUpsert,
 		Operation:   mongo.OpInsert,
+		Namespace:   ns,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: clusterTime,

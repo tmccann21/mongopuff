@@ -13,6 +13,11 @@ import (
 
 type FlushFunc func(ctx context.Context, actions []transform.Action, resumeToken []byte) error
 
+type actionKey struct {
+	namespace  string
+	documentID string
+}
+
 // pendingFlush holds a batch ready to be written, extracted under the lock.
 type pendingFlush struct {
 	actions     []transform.Action
@@ -34,23 +39,23 @@ type Batcher struct {
 	flushFn FlushFunc
 
 	mu          sync.Mutex
-	actions     map[string]transform.Action // keyed by DocumentID for dedup
-	order       []string                    // insertion order of document IDs
+	actions     map[actionKey]transform.Action // keyed by (Namespace, DocumentID) for dedup
+	order       []actionKey                    // first-insertion order of keys; see drainLocked
 	timer       *time.Timer
 	resumeToken []byte // token of the most recent event added
 	closed      bool
 
 	ctx        context.Context // lifecycle context, used for timer-initiated flushes
-	flushCh    chan flushItem   // pre-drained batches from Add/Flush/Close
-	timerFired chan struct{}    // timer signals "time to flush"
-	done       chan struct{}    // closed when flushLoop exits
+	flushCh    chan flushItem  // pre-drained batches from Add/Flush/Close
+	timerFired chan struct{}   // timer signals "time to flush"
+	done       chan struct{}   // closed when flushLoop exits
 }
 
 func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
 	b := &Batcher{
 		config:     cfg,
 		flushFn:    flushFn,
-		actions:    make(map[string]transform.Action),
+		actions:    make(map[actionKey]transform.Action),
 		ctx:        ctx,
 		flushCh:    make(chan flushItem, 2),
 		timerFired: make(chan struct{}, 1),
@@ -87,23 +92,37 @@ func (b *Batcher) flushLoop() {
 	}
 }
 
-// Add adds an action to the batch, deduplicating by document ID (latest wins).
-func (b *Batcher) Add(ctx context.Context, action transform.Action, resumeToken []byte) error {
-	if action.Type == transform.ActionSkip {
-		return nil
-	}
-
+// Add adds the actions produced by a single change event, deduplicating by
+// (Namespace, DocumentID) with the latest action winning.
+//
+// All of an event's actions enter the batch together, under one lock, so they
+// are always flushed together. Otherwise a flush could save resumeToken while
+// part of its event is still pending, and a crash before the next flush would
+// lose that part. As a consequence a count-triggered flush may exceed
+// BatchFlushCount by up to len(actions)-1.
+func (b *Batcher) Add(ctx context.Context, actions []transform.Action, resumeToken []byte) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return fmt.Errorf("batcher is closed")
 	}
 
-	// Dedup: if this document ID is already in the batch, replace it.
-	if _, exists := b.actions[action.DocumentID]; !exists {
-		b.order = append(b.order, action.DocumentID)
+	added := false
+	for _, action := range actions {
+		if action.Type == transform.ActionSkip {
+			continue
+		}
+		key := actionKey{namespace: action.Namespace, documentID: action.DocumentID}
+		if _, exists := b.actions[key]; !exists {
+			b.order = append(b.order, key)
+		}
+		b.actions[key] = action
+		added = true
 	}
-	b.actions[action.DocumentID] = action
+	if !added {
+		b.mu.Unlock()
+		return nil
+	}
 	b.resumeToken = resumeToken
 
 	// Start the flush timer when the first event enters an empty batch.
@@ -181,15 +200,17 @@ func (b *Batcher) drainLocked() *pendingFlush {
 		return nil
 	}
 
+	// Walk order rather than the map so batches come out in a predictable
+	// order; map iteration is randomized. This is for predictability only.
+	// Correctness doesn't depend on it, because dedup leaves at most one action
+	// per (Namespace, DocumentID) in a batch.
 	batch := make([]transform.Action, 0, len(b.actions))
-	for _, id := range b.order {
-		if a, ok := b.actions[id]; ok {
-			batch = append(batch, a)
-		}
+	for _, key := range b.order {
+		batch = append(batch, b.actions[key])
 	}
 
 	token := b.resumeToken
-	b.actions = make(map[string]transform.Action)
+	b.actions = make(map[actionKey]transform.Action)
 	b.order = b.order[:0]
 	b.resumeToken = nil
 

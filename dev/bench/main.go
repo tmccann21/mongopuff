@@ -177,11 +177,8 @@ func runCollection(ctx context.Context, index int, numEvents int) collectionResu
 			continue
 		}
 
-		for _, action := range actions {
-			if err := batcher.Add(ctx, action, resumeToken); err != nil {
-				fmt.Fprintf(os.Stderr, "batcher error: %v\n", err)
-				break
-			}
+		if err := batcher.Add(ctx, actions, resumeToken); err != nil {
+			fmt.Fprintf(os.Stderr, "batcher error: %v\n", err)
 		}
 		result.events++
 	}

@@ -87,7 +87,7 @@ func runBackfill() error {
 			actions = append(actions, action)
 		}
 
-		if err := w.WriteBatch(ctx, collCfg.Mapping.Namespace, schema, actions); err != nil {
+		if err := w.WriteBatch(ctx, schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
 		lastID = docs[len(docs)-1]["_id"]

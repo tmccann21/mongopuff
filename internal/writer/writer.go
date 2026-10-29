@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/tmccann21/mongopuff/internal/mongo"
@@ -33,17 +34,62 @@ func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 	}
 }
 
-// WriteBatch writes a batch of actions to turbopuffer in a single API call.
-// On failure, writes all actions to the DLQ.
-func (w *Writer) WriteBatch(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
-	if len(actions) == 0 {
+// WriteBatch writes actions to turbopuffer with one API call per namespace,
+// writing namespaces concurrently. When a namespace's write fails, its actions
+// go to the DLQ; other namespaces are unaffected.
+//
+// WriteBatch returns only after every namespace has been written or DLQ'd, so
+// the caller may save its resume token on a nil return. It returns an error if
+// any namespace could be neither.
+func (w *Writer) WriteBatch(ctx context.Context, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
+	partitions := partitionByNamespace(actions)
+
+	// Each goroutine writes only its own slot, so errs needs no lock. A plain
+	// WaitGroup rather than errgroup.WithContext: one namespace failing must not
+	// cancel writes to the others.
+	errs := make([]error, len(partitions))
+	var wg sync.WaitGroup
+	for i, p := range partitions {
+		wg.Go(func() {
+			errs[i] = w.writePartition(ctx, schema, p)
+		})
+	}
+	wg.Wait()
+
+	return errors.Join(errs...)
+}
+
+// partition is the set of actions bound for one turbopuffer namespace.
+type partition struct {
+	namespace string
+	actions   []transform.Action
+}
+
+// partitionByNamespace groups actions by Namespace. Partitions appear in the
+// order their namespace first occurs, and each keeps its actions' relative order.
+func partitionByNamespace(actions []transform.Action) []partition {
+	var partitions []partition
+	index := make(map[string]int)
+	for _, a := range actions {
+		i, ok := index[a.Namespace]
+		if !ok {
+			i = len(partitions)
+			index[a.Namespace] = i
+			partitions = append(partitions, partition{namespace: a.Namespace})
+		}
+		partitions[i].actions = append(partitions[i].actions, a)
+	}
+	return partitions
+}
+
+func (w *Writer) writePartition(ctx context.Context, schema map[string]tpuf.AttributeSchemaConfigParam, p partition) error {
+	writeErr := w.tpuf.Write(ctx, p.namespace, schema, p.actions)
+	if writeErr == nil {
 		return nil
 	}
-
-	if err := w.tpuf.Write(ctx, namespace, schema, actions); err != nil {
-		return w.sendToDLQ(ctx, namespace, actions, err)
+	if err := w.sendToDLQ(ctx, p.namespace, p.actions, writeErr); err != nil {
+		return fmt.Errorf("namespace %q: %w", p.namespace, err)
 	}
-
 	return nil
 }
 
@@ -73,7 +119,7 @@ func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespac
 		}
 
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, namespace, schema, actions); err != nil {
+		if err := w.WriteBatch(ctx, schema, actions); err != nil {
 			slog.Error("spool delivery failed", "namespace", namespace, "segment", nextDeliver, "error", err)
 		}
 		slog.Info("spool delivery",
@@ -114,4 +160,3 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 
 	return nil
 }
-

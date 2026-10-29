@@ -128,10 +128,8 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 			continue
 		}
 
-		for _, action := range actions {
-			if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
-				return fmt.Errorf("batch flush failed: %w", err)
-			}
+		if err := batcher.Add(ctx, actions, stream.ResumeToken()); err != nil {
+			return fmt.Errorf("batch flush failed: %w", err)
 		}
 	}
 
@@ -173,7 +171,7 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, namespace, schema, actions); err != nil {
+		if err := w.WriteBatch(ctx, schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
 		slog.Info("flush",
