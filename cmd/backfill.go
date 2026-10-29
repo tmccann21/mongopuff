@@ -10,9 +10,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/tmccann21/mongopuff/internal/writer"
-	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	"github.com/tmccann21/mongopuff/internal/config"
+	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
+	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	"github.com/tmccann21/mongopuff/internal/writer"
+	tpuf "github.com/turbopuffer/turbopuffer-go/v2"
 )
 
 func runBackfill() error {
@@ -78,17 +81,8 @@ func runBackfill() error {
 			"docs", len(docs),
 			"cursor", lastID,
 		)
-		actions := make([]transform.Action, 0, len(docs))
-		for _, doc := range docs {
-			action, err := transform.MapDocument(doc, opTime, collCfg)
-			if err != nil {
-				return fmt.Errorf("map document: %w", err)
-			}
-			actions = append(actions, action)
-		}
-
-		if err := w.WriteBatch(ctx, schema, actions); err != nil {
-			return fmt.Errorf("write batch: %w", err)
+		if err := backfillPage(ctx, w, dlqWriter, schema, collCfg, docs, opTime); err != nil {
+			return err
 		}
 		lastID = docs[len(docs)-1]["_id"]
 
@@ -98,5 +92,24 @@ func runBackfill() error {
 		slog.Info("page written", "collection", collCfg.Name, "page", page, "cursor", lastID)
 	}
 
+	return nil
+}
+
+// backfillPage maps one scanned page to upserts stamped with opTime and writes
+// them with one turbopuffer call per resolved namespace. The caller saves the
+// backfill cursor only on a nil return.
+func backfillPage(ctx context.Context, w *writer.Writer, dlq mongo.DLQWriter, schema map[string]tpuf.AttributeSchemaConfigParam, coll config.CollectionConfig, docs []map[string]any, opTime uint64) error {
+	actions := make([]transform.Action, 0, len(docs))
+	for _, doc := range docs {
+		action, err := transform.MapDocument(doc, opTime, coll)
+		if err != nil {
+			return fmt.Errorf("map document: %w", err)
+		}
+		actions = append(actions, action)
+	}
+
+	if err := w.WriteBatch(ctx, schema, actions); err != nil {
+		return fmt.Errorf("write batch: %w", err)
+	}
 	return nil
 }
