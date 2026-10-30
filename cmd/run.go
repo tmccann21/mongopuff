@@ -115,8 +115,10 @@ func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batc
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "error", err)
 			entry := transformFailureEntry(coll.Name, event.DocumentID, event.Operation, event.ClusterTime, err)
+			// An event in neither turbopuffer nor the DLQ must stop the stream:
+			// the next flush would save a resume token past it.
 			if err := dlqWriter.Write(ctx, entry); err != nil {
-				slog.Error("DLQ write error", "collection", coll.Name, "error", err)
+				return fmt.Errorf("DLQ write for document %v: %w", event.DocumentID, err)
 			}
 			continue
 		}
