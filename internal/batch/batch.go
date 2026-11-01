@@ -11,6 +11,9 @@ import (
 	"github.com/tmccann21/mongopuff/internal/transform"
 )
 
+// FlushFunc writes a batch and then saves resumeToken. It returns an error
+// only when the batch was not durably handled (written to turbopuffer or the
+// DLQ, or to the spool), in which case resumeToken must not have been saved.
 type FlushFunc func(ctx context.Context, actions []transform.Action, resumeToken []byte) error
 
 type actionKey struct {
@@ -33,6 +36,8 @@ type flushItem struct {
 
 // Batcher accumulates CDC actions and flushes when count or time thresholds are hit.
 // All flushFn calls are serialized through a single background goroutine.
+// After any flush fails, no further flush runs and Add and Flush return the
+// error, so the caller stops and replays from its last saved resume token.
 // Backfill does not use the batcher — pages are written directly by the backfill loop.
 type Batcher struct {
 	config  config.GlobalConfig
@@ -44,6 +49,7 @@ type Batcher struct {
 	timer       *time.Timer
 	resumeToken []byte // token of the most recent event added
 	closed      bool
+	err         error // first flush error; once set, no further flush runs. Written only by flushLoop.
 
 	ctx        context.Context // lifecycle context, used for timer-initiated flushes
 	flushCh    chan flushItem  // pre-drained batches from Add/Flush/Close
@@ -69,25 +75,42 @@ func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batch
 func (b *Batcher) flushLoop() {
 	defer close(b.done)
 	for {
+		var item flushItem
 		select {
 		case <-b.timerFired:
 			b.mu.Lock()
 			pending := b.drainLocked()
 			b.mu.Unlock()
-			if pending != nil {
-				if err := b.flushFn(b.ctx, pending.actions, pending.resumeToken); err != nil {
-					slog.Error("timer flush failed", "error", err)
-				}
+			if pending == nil {
+				continue
 			}
+			item = flushItem{pending: pending, ctx: b.ctx} // no errCh: nobody is waiting
 
-		case item, ok := <-b.flushCh:
+		case it, ok := <-b.flushCh:
 			if !ok {
 				return
 			}
-			err := b.flushFn(item.ctx, item.pending.actions, item.pending.resumeToken)
-			if item.errCh != nil {
-				item.errCh <- err
+			item = it
+		}
+
+		// After a failed flush, no later flush may run: it would save a resume
+		// token past the failed batch's events.
+		b.mu.Lock()
+		err := b.err
+		b.mu.Unlock()
+		if err == nil {
+			err = b.flushFn(item.ctx, item.pending.actions, item.pending.resumeToken)
+			if err != nil {
+				b.mu.Lock()
+				b.err = err
+				b.mu.Unlock()
 			}
+		}
+
+		if item.errCh != nil {
+			item.errCh <- err
+		} else if err != nil {
+			slog.Error("timer flush failed", "error", err)
 		}
 	}
 }
@@ -105,6 +128,10 @@ func (b *Batcher) Add(ctx context.Context, actions []transform.Action, resumeTok
 	if b.closed {
 		b.mu.Unlock()
 		return fmt.Errorf("batcher is closed")
+	}
+	if b.err != nil {
+		b.mu.Unlock()
+		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
 	}
 
 	added := false
@@ -156,6 +183,10 @@ func (b *Batcher) Flush(ctx context.Context) error {
 	if b.closed {
 		b.mu.Unlock()
 		return fmt.Errorf("batcher is closed")
+	}
+	if b.err != nil {
+		b.mu.Unlock()
+		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
 	}
 	pending := b.drainLocked()
 	b.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -321,13 +322,36 @@ func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {
 	}
 }
 
+// startDelivery runs RunSpoolDelivery from segment 0 in a goroutine and
+// returns a channel that receives its result.
+func startDelivery(ctx context.Context, w *Writer, sp *spool.Spool) <-chan error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
+	}()
+	return errCh
+}
+
+// awaitDelivery waits for RunSpoolDelivery to return and gives its result.
+func awaitDelivery(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunSpoolDelivery did not return")
+		return nil
+	}
+}
+
 // The resume token for a spooled segment is saved when the segment is written,
 // so the segment file is the only copy of its events. Delivery may remove it
-// only once it has been written to turbopuffer or the DLQ, and must not deliver
-// later segments first: deletes are unconditional, so retrying an older upsert
-// after a newer delete would bring a deleted document back.
+// only once it has been written to turbopuffer or the DLQ. When it cannot,
+// delivery stops with an error and keeps the segment rather than moving on:
+// deletes are unconditional, so delivering a newer delete before an older
+// upsert would let the upsert bring a deleted document back.
 
-func TestRunSpoolDelivery_KeepsUndeliverableSegment(t *testing.T) {
+func TestRunSpoolDelivery_StopsAtUndeliverableSegment(t *testing.T) {
 	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
@@ -340,21 +364,13 @@ func TestRunSpoolDelivery_KeepsUndeliverableSegment(t *testing.T) {
 	mock := &mockTpuf{hook: func(context.Context, string) error {
 		return errors.New("turbopuffer unavailable")
 	}}
-	dlq := &recordingDLQ{err: errors.New("dlq unavailable")}
-	w := New(mock, dlq)
+	dlqErr := errors.New("dlq unavailable")
+	w := New(mock, &recordingDLQ{err: dlqErr})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
-		close(done)
-	}()
-
-	waitFor(t, func() bool { return len(dlq.getEntries()) >= 1 }, 2*time.Second)
-	cancel()
-	<-done
+	err = awaitDelivery(t, startDelivery(context.Background(), w, sp))
+	if !errors.Is(err, dlqErr) {
+		t.Errorf("RunSpoolDelivery error = %v, want it to wrap %v", err, dlqErr)
+	}
 
 	assertSegmentsOnDisk(t, sp, 0, 1)
 	for _, call := range mock.getCalls() {
@@ -367,7 +383,7 @@ func TestRunSpoolDelivery_KeepsUndeliverableSegment(t *testing.T) {
 func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
 	// Shutdown cancels ctx while a delivery is in flight, which fails both the
 	// turbopuffer write and the DLQ fallback. That segment must survive for the
-	// next run to deliver.
+	// next run to deliver, and shutting down is not an error.
 	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
@@ -387,12 +403,7 @@ func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
-		close(done)
-	}()
+	errCh := startDelivery(ctx, w, sp)
 
 	select {
 	case <-inFlight:
@@ -400,8 +411,10 @@ func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
 		t.Fatal("delivery never started")
 	}
 	cancel()
-	<-done
 
+	if err := awaitDelivery(t, errCh); err != nil {
+		t.Errorf("RunSpoolDelivery error = %v, want nil on shutdown", err)
+	}
 	assertSegmentsOnDisk(t, sp, 0)
 }
 
@@ -422,27 +435,49 @@ func TestRunSpoolDelivery_StopsAtCorruptSegment(t *testing.T) {
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
-		close(done)
-	}()
-
-	// Either delivery stops on its own, or it is still blocked on segment 0.
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		cancel()
-		<-done
+	if err := awaitDelivery(t, startDelivery(context.Background(), w, sp)); err == nil {
+		t.Error("RunSpoolDelivery returned nil, want an error for corrupt segment 0")
 	}
-
 	if n := mock.callCount(); n != 0 {
 		t.Errorf("got %d turbopuffer calls, want 0: segment 1 was delivered past corrupt segment 0", n)
 	}
 	assertSegmentsOnDisk(t, sp, 0, 1)
+}
+
+func TestRunSpoolDelivery_StopsWhenRemoveFails(t *testing.T) {
+	// A delivered segment that stays on disk is delivered again on the next
+	// run. If delivery moved on, that redelivery would come after newer
+	// segments.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so Remove cannot be made to fail")
+	}
+
+	dir := t.TempDir()
+	sp, err := spool.Open(dir)
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+	defer sp.Close()
+
+	writeSegment(t, sp, 0, makeActions("doc-0"))
+
+	// A read-only directory still allows reading segment 0 but not removing it.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) }) // let TempDir cleanup remove it
+
+	mock := &mockTpuf{}
+	w := New(mock, noopDLQ{})
+
+	err = awaitDelivery(t, startDelivery(context.Background(), w, sp))
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("RunSpoolDelivery error = %v, want it to wrap os.ErrPermission", err)
+	}
+	if n := mock.callCount(); n != 1 {
+		t.Errorf("got %d turbopuffer calls, want 1", n)
+	}
+	assertSegmentsOnDisk(t, sp, 0)
 }
 
 func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {

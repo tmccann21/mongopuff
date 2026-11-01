@@ -93,7 +93,17 @@ func (w *Writer) writePartition(ctx context.Context, schema map[string]tpuf.Attr
 	return nil
 }
 
-func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, startSegment uint32, signal <-chan struct{}) {
+// RunSpoolDelivery writes spool segments to turbopuffer in order, starting at
+// startSegment, and removes each one once it has been written or DLQ'd. It
+// waits on signal for new segments and returns nil when ctx is done.
+//
+// It returns an error, leaving the segment on disk for the next run, when a
+// segment cannot be read, decoded, delivered, or removed after delivery. The
+// segment's resume token is already saved, so the file is the only copy of its
+// events. Delivery stops rather than moving past it, which also keeps segments
+// in order: deletes are unconditional, so delivering a newer delete before an
+// older upsert would let the upsert bring a deleted document back.
+func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, startSegment uint32, signal <-chan struct{}) error {
 	nextDeliver := startSegment
 
 	for {
@@ -103,24 +113,24 @@ func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespac
 			case <-signal:
 				continue
 			case <-ctx.Done():
-				return
+				return nil
 			}
 		}
 		if err != nil {
-			slog.Error("spool read error", "namespace", namespace, "segment", nextDeliver, "error", err)
-			return
+			return fmt.Errorf("reading spool segment %d: %w", nextDeliver, err)
 		}
 
 		var actions []transform.Action
 		if err := json.Unmarshal(data, &actions); err != nil {
-			slog.Error("spool deserialize error", "namespace", namespace, "segment", nextDeliver, "error", err)
-			nextDeliver++
-			continue
+			return fmt.Errorf("spool segment %d cannot be decoded; its events cannot be delivered and the collection needs a re-backfill: %w", nextDeliver, err)
 		}
 
 		flushStart := time.Now()
 		if err := w.WriteBatch(ctx, schema, actions); err != nil {
-			slog.Error("spool delivery failed", "namespace", namespace, "segment", nextDeliver, "error", err)
+			if ctx.Err() != nil {
+				return nil // shutting down; the next run delivers this segment
+			}
+			return fmt.Errorf("delivering spool segment %d: %w", nextDeliver, err)
 		}
 		slog.Info("spool delivery",
 			"namespace", namespace,
@@ -129,7 +139,9 @@ func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespac
 			"flushDuration", time.Since(flushStart),
 		)
 
-		sp.Remove(nextDeliver)
+		if err := sp.Remove(nextDeliver); err != nil {
+			return fmt.Errorf("removing delivered spool segment %d: %w", nextDeliver, err)
+		}
 		nextDeliver++
 	}
 }

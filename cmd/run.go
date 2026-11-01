@@ -23,6 +23,7 @@ import (
 	"github.com/tmccann21/mongopuff/internal/writer"
 
 	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
+	"golang.org/x/sync/errgroup"
 )
 
 func runCDC() error {
@@ -283,14 +284,14 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 		startDeliver = segments[0]
 	}
 
-	var deliveryWg sync.WaitGroup
-	deliveryWg.Add(1)
-	go func() {
-		defer deliveryWg.Done()
-		w.RunSpoolDelivery(ctx, sp, namespace, schema, startDeliver, signal)
-	}()
-
-	err = consumeStream(ctx, stream, batcher, coll, dlqWriter)
-	deliveryWg.Wait()
-	return err
+	// Delivery and the change stream stop together: whichever fails first
+	// cancels the other, and Wait returns its error.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return w.RunSpoolDelivery(gctx, sp, namespace, schema, startDeliver, signal)
+	})
+	g.Go(func() error {
+		return consumeStream(gctx, stream, batcher, coll, dlqWriter)
+	})
+	return g.Wait()
 }
