@@ -237,7 +237,6 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 
 	namespace := coll.Mapping.Namespace
 	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
-	nextSegment := state.SpoolSegment + 1
 	signal := make(chan struct{}, 1)
 
 	batcher := batch.New(ctx, cfg.Global, func(
@@ -248,24 +247,20 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 			return fmt.Errorf("serialize batch: %w", err)
 		}
 
-		if err := sp.Write(nextSegment, data); err != nil {
+		segment, err := sp.Append(data)
+		if err != nil {
 			return fmt.Errorf("spool write: %w", err)
 		}
 
 		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
 			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
 		}
-		if err := store.SaveSpoolSegment(ctx, coll.Name, nextSegment); err != nil {
-			slog.Error("failed to save spool segment", "collection", coll.Name, "error", err)
-		}
 
 		slog.Info("spool flush",
 			"namespace", namespace,
 			"batchSize", len(actions),
-			"segment", nextSegment,
+			"segment", segment,
 		)
-
-		nextSegment++
 
 		select {
 		case signal <- struct{}{}:
@@ -274,21 +269,11 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 		return nil
 	})
 
-	// Determine where delivery starts: lowest existing segment on disk, or next expected.
-	segments, err := sp.Segments()
-	if err != nil {
-		return fmt.Errorf("listing spool segments: %w", err)
-	}
-	startDeliver := nextSegment
-	if len(segments) > 0 {
-		startDeliver = segments[0]
-	}
-
 	// Delivery and the change stream stop together: whichever fails first
 	// cancels the other, and Wait returns its error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return w.RunSpoolDelivery(gctx, sp, namespace, schema, startDeliver, signal)
+		return w.RunSpoolDelivery(gctx, sp, namespace, schema, sp.First(), signal)
 	})
 	g.Go(func() error {
 		return consumeStream(gctx, stream, batcher, coll, dlqWriter)

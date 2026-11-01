@@ -97,14 +97,15 @@ func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
 
 // --- helpers ---
 
-func writeSegment(t *testing.T, sp *spool.Spool, seg uint32, actions []transform.Action) {
+// writeSegment appends actions to the spool as its next segment.
+func writeSegment(t *testing.T, sp *spool.Spool, actions []transform.Action) {
 	t.Helper()
 	data, err := json.Marshal(actions)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if err := sp.Write(seg, data); err != nil {
-		t.Fatalf("spool.Write(%d): %v", seg, err)
+	if _, err := sp.Append(data); err != nil {
+		t.Fatalf("spool.Append: %v", err)
 	}
 }
 
@@ -142,9 +143,9 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
-	writeSegment(t, sp, 1, makeActions("doc-1"))
-	writeSegment(t, sp, 2, makeActions("doc-2"))
+	writeSegment(t, sp, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-1"))
+	writeSegment(t, sp, makeActions("doc-2"))
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -214,7 +215,7 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 	}
 
 	// Write a segment and signal.
-	writeSegment(t, sp, 0, makeActions("doc-signal"))
+	writeSegment(t, sp, makeActions("doc-signal"))
 	signal <- struct{}{}
 
 	waitFor(t, func() bool { return mock.callCount() >= 1 }, 2*time.Second)
@@ -266,8 +267,8 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-fail"))
-	writeSegment(t, sp, 1, makeActions("doc-ok"))
+	writeSegment(t, sp, makeActions("doc-fail"))
+	writeSegment(t, sp, makeActions("doc-ok"))
 
 	mock := &mockTpuf{
 		errs: []error{fmt.Errorf("transient turbopuffer error")},
@@ -358,8 +359,8 @@ func TestRunSpoolDelivery_StopsAtUndeliverableSegment(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-fail"))
-	writeSegment(t, sp, 1, makeActions("doc-later"))
+	writeSegment(t, sp, makeActions("doc-fail"))
+	writeSegment(t, sp, makeActions("doc-later"))
 
 	mock := &mockTpuf{hook: func(context.Context, string) error {
 		return errors.New("turbopuffer unavailable")
@@ -390,7 +391,7 @@ func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-0"))
 
 	inFlight := make(chan struct{})
 	var once sync.Once
@@ -427,10 +428,10 @@ func TestRunSpoolDelivery_StopsAtCorruptSegment(t *testing.T) {
 	}
 	defer sp.Close()
 
-	if err := sp.Write(0, []byte("not json")); err != nil {
-		t.Fatalf("spool.Write(0): %v", err)
+	if _, err := sp.Append([]byte("not json")); err != nil {
+		t.Fatalf("spool.Append: %v", err)
 	}
-	writeSegment(t, sp, 1, makeActions("doc-later"))
+	writeSegment(t, sp, makeActions("doc-later"))
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -459,7 +460,7 @@ func TestRunSpoolDelivery_StopsWhenRemoveFails(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-0"))
 
 	// A read-only directory still allows reading segment 0 but not removing it.
 	if err := os.Chmod(dir, 0o555); err != nil {
@@ -487,9 +488,9 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 	}
 	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
-	writeSegment(t, sp, 1, makeActions("doc-1"))
-	writeSegment(t, sp, 2, makeActions("doc-2"))
+	writeSegment(t, sp, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-1"))
+	writeSegment(t, sp, makeActions("doc-2"))
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
