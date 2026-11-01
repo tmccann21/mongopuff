@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -67,6 +68,13 @@ func TestVerifyPreImages(t *testing.T) {
 			specs:       []mongodriver.CollectionSpecification{mustCollSpec("users", preImagesDisabled)},
 		},
 		{
+			// A change stream can watch a collection that does not exist yet.
+			// The "does not exist" error is for dynamic namespaces only.
+			name:        "static_collection_missing_skipped",
+			collections: []config.CollectionConfig{collConfig("users", "users")},
+			specs:       nil,
+		},
+		{
 			name: "multiple_failures_reported",
 			collections: []config.CollectionConfig{
 				collConfig("orders", "orders_{{tenant}}"),
@@ -100,5 +108,22 @@ func TestVerifyPreImages(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCheckPreImages_StaticNamespacesSkipListCollections(t *testing.T) {
+	// listCollections needs a privilege that a static deployment's user may
+	// not have been granted, so querying it for static collections could stop
+	// an existing deployment from starting. The store is nil: any query
+	// panics, and the recover turns that into a test failure.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("checkPreImages queried MongoDB for static collections: %v", r)
+		}
+	}()
+
+	collections := []config.CollectionConfig{collConfig("users", "users"), collConfig("orders", "order_data")}
+	if err := checkPreImages(context.Background(), nil, collections); err != nil {
+		t.Fatalf("checkPreImages: %v", err)
 	}
 }

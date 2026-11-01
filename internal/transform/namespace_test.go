@@ -70,3 +70,24 @@ func TestResolveNamespace_NestedPathRejected(t *testing.T) {
 		t.Errorf("error %q should mention nested", err.Error())
 	}
 }
+
+// IsDynamic gates the pre-image check, fullDocumentBeforeChange on the change
+// stream, and namespace transition detection. A static namespace it reports as
+// dynamic turns on all three.
+func TestIsDynamic(t *testing.T) {
+	tests := []struct {
+		namespace string
+		want      bool
+	}{
+		{"users", false},
+		{"order_data", false},
+		{"orders-v2.prod", false},
+		{"orders_{{tenant}}", true},
+		{"{{region}}_orders_{{tier}}", true},
+	}
+	for _, tt := range tests {
+		if got := IsDynamic(tt.namespace); got != tt.want {
+			t.Errorf("IsDynamic(%q) = %v, want %v", tt.namespace, got, tt.want)
+		}
+	}
+}

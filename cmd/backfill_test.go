@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -88,6 +89,19 @@ func tenantDoc(id, tenant string) bson.D {
 
 func backfillCollConfig() config.CollectionConfig {
 	coll := collConfig("items", "items_{{tenant}}")
+	coll.Mapping.Fields = []config.FieldMapping{{Name: "name", Type: config.FieldTypeString}}
+	return coll
+}
+
+// staticDoc has no tenant field: a static namespace needs no field to resolve.
+func staticDoc(id string) bson.D {
+	return bson.D{{Key: "_id", Value: id}, {Key: "name", Value: id}}
+}
+
+// staticCollConfig's namespace differs from its collection name, so an action
+// that carries the collection name instead of the namespace is caught.
+func staticCollConfig() config.CollectionConfig {
+	coll := collConfig("users", "user_profiles")
 	coll.Mapping.Fields = []config.FieldMapping{{Name: "name", Type: config.FieldTypeString}}
 	return coll
 }
@@ -265,4 +279,34 @@ func mustDecimal128(t *testing.T, s string) bson.Decimal128 {
 		t.Fatalf("bson.ParseDecimal128(%q): %v", s, err)
 	}
 	return d
+}
+
+func TestBackfillPage_StaticNamespaceIsOneCall(t *testing.T) {
+	tp := &fakeTpuf{}
+	dlq := &recordingDLQ{}
+	w := writer.New(tp, dlq)
+
+	const docs = 100
+	page := make([]bson.D, 0, docs)
+	wantIDs := make([]string, 0, docs)
+	for i := range docs {
+		id := fmt.Sprintf("doc-%03d", i)
+		page = append(page, staticDoc(id))
+		wantIDs = append(wantIDs, id)
+	}
+
+	if err := backfillPage(context.Background(), w, dlq, nil, staticCollConfig(), scannedPage(t, page...), backfillOpTime); err != nil {
+		t.Fatalf("backfillPage: %v", err)
+	}
+
+	if entries := dlq.getEntries(); len(entries) != 0 {
+		t.Fatalf("got %d DLQ entries, want 0: %+v", len(entries), entries)
+	}
+	calls := tp.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d turbopuffer calls for a page of %d documents, want 1", len(calls), docs)
+	}
+	if got := writtenDocIDs(t, calls)["user_profiles"]; !slices.Equal(got, wantIDs) {
+		t.Errorf("namespace \"user_profiles\": got doc IDs %v, want %v", got, wantIDs)
+	}
 }
