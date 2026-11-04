@@ -152,6 +152,7 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 	tp := &fakeTpuf{}
 	dlq := &recordingDLQ{}
 	w := writer.New(tp, dlq)
+	coll := staticCollConfig()
 
 	// Thresholds above the event count, so the only flush is consumeStream's
 	// final one and every event lands in it.
@@ -161,11 +162,11 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 		ctx context.Context, actions []transform.Action, _ []byte,
 	) error {
 		flushes.Add(1)
-		return w.WriteBatch(ctx, nil, actions)
+		return w.WriteBatch(ctx, coll.Name, nil, actions)
 	})
 	defer b.Close(ctx)
 
-	if err := consumeStream(ctx, &fakeStream{events: events}, b, staticCollConfig(), dlq); err != nil {
+	if err := consumeStream(ctx, &fakeStream{events: events}, b, coll, dlq); err != nil {
 		t.Fatalf("consumeStream: %v", err)
 	}
 

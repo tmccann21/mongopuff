@@ -118,7 +118,7 @@ func backfillPage(ctx context.Context, w *writer.Writer, dlq mongo.DLQWriter, sc
 		actions = append(actions, action)
 	}
 
-	if err := w.WriteBatch(ctx, schema, actions); err != nil {
+	if err := w.WriteBatch(ctx, coll.Name, schema, actions); err != nil {
 		return fmt.Errorf("write batch: %w", err)
 	}
 	return nil

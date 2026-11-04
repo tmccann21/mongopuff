@@ -40,8 +40,9 @@ func New(tpuf TurbopufferClient, dlq mongo.DLQWriter) *Writer {
 //
 // WriteBatch returns only after every namespace has been written or DLQ'd, so
 // the caller may save its resume token on a nil return. It returns an error if
-// any namespace could be neither.
-func (w *Writer) WriteBatch(ctx context.Context, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
+// any namespace could be neither. collection is the MongoDB collection the
+// actions came from, recorded on DLQ entries.
+func (w *Writer) WriteBatch(ctx context.Context, collection string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
 	partitions := partitionByNamespace(actions)
 
 	// Each goroutine writes only its own slot, so errs needs no lock. A plain
@@ -51,7 +52,7 @@ func (w *Writer) WriteBatch(ctx context.Context, schema map[string]tpuf.Attribut
 	var wg sync.WaitGroup
 	for i, p := range partitions {
 		wg.Go(func() {
-			errs[i] = w.writePartition(ctx, schema, p)
+			errs[i] = w.writePartition(ctx, collection, schema, p)
 		})
 	}
 	wg.Wait()
@@ -82,20 +83,20 @@ func partitionByNamespace(actions []transform.Action) []partition {
 	return partitions
 }
 
-func (w *Writer) writePartition(ctx context.Context, schema map[string]tpuf.AttributeSchemaConfigParam, p partition) error {
+func (w *Writer) writePartition(ctx context.Context, collection string, schema map[string]tpuf.AttributeSchemaConfigParam, p partition) error {
 	writeErr := w.tpuf.Write(ctx, p.namespace, schema, p.actions)
 	if writeErr == nil {
 		return nil
 	}
-	if err := w.sendToDLQ(ctx, p.namespace, p.actions, writeErr); err != nil {
+	if err := w.sendToDLQ(ctx, collection, p.namespace, p.actions, writeErr); err != nil {
 		return fmt.Errorf("namespace %q: %w", p.namespace, err)
 	}
 	return nil
 }
 
-// RunSpoolDelivery writes spool segments to turbopuffer in order, starting at
-// startSegment, and removes each one once it has been written or DLQ'd. It
-// waits on signal for new segments and returns nil when ctx is done.
+// RunSpoolDelivery writes collection's spool segments to turbopuffer in order,
+// starting at startSegment, and removes each one once it has been written or
+// DLQ'd. It waits on signal for new segments and returns nil when ctx is done.
 //
 // It returns an error, leaving the segment on disk for the next run, when a
 // segment cannot be read, decoded, delivered, or removed after delivery. The
@@ -103,7 +104,7 @@ func (w *Writer) writePartition(ctx context.Context, schema map[string]tpuf.Attr
 // events. Delivery stops rather than moving past it, which also keeps segments
 // in order: deletes are unconditional, so delivering a newer delete before an
 // older upsert would let the upsert bring a deleted document back.
-func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, startSegment uint32, signal <-chan struct{}) error {
+func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, collection string, schema map[string]tpuf.AttributeSchemaConfigParam, startSegment uint32, signal <-chan struct{}) error {
 	nextDeliver := startSegment
 
 	for {
@@ -126,14 +127,14 @@ func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespac
 		}
 
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, schema, actions); err != nil {
+		if err := w.WriteBatch(ctx, collection, schema, actions); err != nil {
 			if ctx.Err() != nil {
 				return nil // shutting down; the next run delivers this segment
 			}
 			return fmt.Errorf("delivering spool segment %d: %w", nextDeliver, err)
 		}
 		slog.Info("spool delivery",
-			"namespace", namespace,
+			"collection", collection,
 			"batchSize", len(actions),
 			"segment", nextDeliver,
 			"flushDuration", time.Since(flushStart),
@@ -146,9 +147,10 @@ func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, namespac
 	}
 }
 
-func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []transform.Action, writeErr error) error {
+func (w *Writer) sendToDLQ(ctx context.Context, collection, namespace string, actions []transform.Action, writeErr error) error {
 	errKind := turbopuffer.ClassifyError(writeErr)
 	slog.Error("turbopuffer write failed, sending to DLQ",
+		"collection", collection,
 		"namespace", namespace,
 		"actions", len(actions),
 		"errorKind", errKind,
@@ -157,9 +159,11 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 
 	for _, a := range actions {
 		entry := mongo.DLQEntry{
-			Collection:   namespace,
+			Collection:   collection,
 			DocumentID:   a.DocumentID,
 			Operation:    a.Operation,
+			Namespace:    a.Namespace,
+			ActionType:   dlqActionType(a.Type),
 			ErrorKind:    errKind,
 			ErrorMessage: writeErr.Error(),
 			ClusterTime:  a.ClusterTime,
@@ -171,4 +175,19 @@ func (w *Writer) sendToDLQ(ctx context.Context, namespace string, actions []tran
 	}
 
 	return nil
+}
+
+// dlqActionType gives the stored form of t. An unknown type is recorded rather
+// than rejected: failing the DLQ write would stop the pipeline over a label.
+func dlqActionType(t transform.ActionType) mongo.DLQActionType {
+	switch t {
+	case transform.ActionUpsert:
+		return mongo.DLQActionUpsert
+	case transform.ActionPatch:
+		return mongo.DLQActionPatch
+	case transform.ActionDelete:
+		return mongo.DLQActionDelete
+	default:
+		return mongo.DLQActionType(fmt.Sprintf("unknown(%d)", t))
+	}
 }

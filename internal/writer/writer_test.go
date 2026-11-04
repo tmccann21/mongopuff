@@ -3,6 +3,7 @@ package writer
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -66,7 +67,7 @@ func TestWriteBatch_OneCallPerNamespace(t *testing.T) {
 		nsUpsert("tenant-b", "5"),
 	}
 
-	if err := w.WriteBatch(context.Background(), nil, actions); err != nil {
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -99,7 +100,7 @@ func TestWriteBatch_NamespaceTransitionWritesBothNamespaces(t *testing.T) {
 		{Type: transform.ActionUpsert, Operation: mongo.OpUpdate, Namespace: "tenant-new", DocumentID: "doc-1", ClusterTime: 7},
 	}
 
-	if err := w.WriteBatch(context.Background(), nil, actions); err != nil {
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -158,7 +159,7 @@ func TestWriteBatch_WritesPartitionsConcurrently(t *testing.T) {
 		nsUpsert("tenant-c", "3"),
 	}
 
-	if err := w.WriteBatch(context.Background(), nil, actions); err != nil {
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 	if serial.Load() {
@@ -186,7 +187,7 @@ func TestWriteBatch_FailedPartitionGoesToDLQ(t *testing.T) {
 
 	// The failed partition was made durable via the DLQ, so the flush
 	// succeeds and the caller is free to advance the resume token.
-	if err := w.WriteBatch(context.Background(), nil, actions); err != nil {
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
 		t.Fatalf("WriteBatch: %v, want nil when the failed partition was DLQ'd", err)
 	}
 
@@ -197,6 +198,86 @@ func TestWriteBatch_FailedPartitionGoesToDLQ(t *testing.T) {
 	got := docIDsByNamespace(t, mock.getCalls())
 	if want := []string{"b-1"}; !slices.Equal(got["tenant-b"], want) {
 		t.Errorf("tenant-b: got doc IDs %v, want %v", got["tenant-b"], want)
+	}
+}
+
+func TestWriteBatch_FailedTransitionDeleteRecordsOldNamespace(t *testing.T) {
+	// The delete half of a namespace transition fails while the upsert half
+	// succeeds, leaving a stale copy in the old namespace. The DLQ entry is
+	// the only record of where that copy is, so it must name the old
+	// namespace, not the new one or the collection.
+	mock := &mockTpuf{
+		hook: func(_ context.Context, namespace string) error {
+			if namespace == "tenant-old" {
+				return errors.New("turbopuffer rejected write")
+			}
+			return nil
+		},
+	}
+	dlq := &recordingDLQ{}
+	w := New(mock, dlq)
+
+	actions := []transform.Action{
+		{Type: transform.ActionDelete, Operation: mongo.OpUpdate, Namespace: "tenant-old", DocumentID: "doc-1", ClusterTime: 7},
+		{Type: transform.ActionUpsert, Operation: mongo.OpUpdate, Namespace: "tenant-new", DocumentID: "doc-1", ClusterTime: 7},
+	}
+
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	entries := dlq.getEntries()
+	if len(entries) != 1 {
+		t.Fatalf("got %d DLQ entries, want 1: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Collection != testCollection {
+		t.Errorf("Collection = %q, want %q", e.Collection, testCollection)
+	}
+	if e.Namespace != "tenant-old" {
+		t.Errorf("Namespace = %q, want %q", e.Namespace, "tenant-old")
+	}
+	if e.ActionType != mongo.DLQActionDelete {
+		t.Errorf("ActionType = %q, want %q", e.ActionType, mongo.DLQActionDelete)
+	}
+	if e.DocumentID != "doc-1" || e.Operation != mongo.OpUpdate || e.ClusterTime != 7 {
+		t.Errorf("entry = %+v, want document doc-1, operation update, cluster time 7", e)
+	}
+}
+
+func TestWriteBatch_DLQEntryRecordsEachActionType(t *testing.T) {
+	mock := &mockTpuf{
+		hook: func(context.Context, string) error {
+			return errors.New("turbopuffer rejected write")
+		},
+	}
+	dlq := &recordingDLQ{}
+	w := New(mock, dlq)
+
+	actions := []transform.Action{
+		{Type: transform.ActionUpsert, Operation: mongo.OpInsert, Namespace: "tenant-a", DocumentID: "upserted", Attributes: map[string]any{"name": "x"}, ClusterTime: 1},
+		{Type: transform.ActionPatch, Operation: mongo.OpUpdate, Namespace: "tenant-a", DocumentID: "patched", Attributes: map[string]any{"name": "y"}, ClusterTime: 2},
+		{Type: transform.ActionDelete, Operation: mongo.OpDelete, Namespace: "tenant-a", DocumentID: "deleted", ClusterTime: 3},
+	}
+
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	got := make(map[string]mongo.DLQActionType)
+	for _, e := range dlq.getEntries() {
+		got[e.DocumentID] = e.ActionType
+		if e.Collection != testCollection || e.Namespace != "tenant-a" {
+			t.Errorf("%s: Collection, Namespace = %q, %q; want %q, %q", e.DocumentID, e.Collection, e.Namespace, testCollection, "tenant-a")
+		}
+	}
+	want := map[string]mongo.DLQActionType{
+		"upserted": mongo.DLQActionUpsert,
+		"patched":  mongo.DLQActionPatch,
+		"deleted":  mongo.DLQActionDelete,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("action types by document = %v, want %v", got, want)
 	}
 }
 
@@ -232,7 +313,7 @@ func TestWriteBatch_UndeliverablePartitionFailsFlush(t *testing.T) {
 
 	// tenant-a can be neither written nor DLQ'd. The flush must fail so the
 	// caller does not save the resume token.
-	err := w.WriteBatch(context.Background(), nil, actions)
+	err := w.WriteBatch(context.Background(), testCollection, nil, actions)
 	if !errors.Is(err, dlqErr) {
 		t.Fatalf("WriteBatch error = %v, want it to wrap %v", err, dlqErr)
 	}
@@ -267,7 +348,7 @@ func TestWriteBatch_ReturnsOnlyAfterAllPartitionsFinish(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- w.WriteBatch(context.Background(), nil, actions)
+		done <- w.WriteBatch(context.Background(), testCollection, nil, actions)
 	}()
 
 	waitFor(t, func() bool {

@@ -28,14 +28,30 @@ const (
 	ErrServerError   ErrorKind = "server_error"
 )
 
+// DLQActionType is the turbopuffer write that a DLQ entry's action failed to
+// make. It is stored, so its values must not change.
+type DLQActionType string
+
+const (
+	DLQActionUpsert DLQActionType = "upsert"
+	DLQActionPatch  DLQActionType = "patch"
+	DLQActionDelete DLQActionType = "delete"
+)
+
 type DLQEntry struct {
-	Collection   string    `bson:"collection"`
-	DocumentID   string    `bson:"documentId"`
-	Operation    Operation `bson:"operation"`
-	ErrorKind    ErrorKind `bson:"errorKind"`
-	ErrorMessage string    `bson:"errorMessage"`
-	ClusterTime  uint64    `bson:"clusterTime"`
-	CreatedAt    time.Time `bson:"createdAt"`
+	// Collection is the source MongoDB collection, never a turbopuffer namespace.
+	Collection string    `bson:"collection"`
+	DocumentID string    `bson:"documentId"`
+	Operation  Operation `bson:"operation"`
+	// Namespace and ActionType record the turbopuffer write that failed. Both
+	// are empty when the event failed before it became a write, such as a
+	// transform failure.
+	Namespace    string        `bson:"namespace,omitempty"`
+	ActionType   DLQActionType `bson:"actionType,omitempty"`
+	ErrorKind    ErrorKind     `bson:"errorKind"`
+	ErrorMessage string        `bson:"errorMessage"`
+	ClusterTime  uint64        `bson:"clusterTime"`
+	CreatedAt    time.Time     `bson:"createdAt"`
 }
 
 // CollectionState is the shape of a document in the _mongopuff_state collection.

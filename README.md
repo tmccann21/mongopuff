@@ -173,6 +173,8 @@ Enable the spool by setting `spoolEnabled: true` in your config. Each collection
 
 When a write to turbopuffer fails (network error, rate limit, server error) or a document can't be transformed (type mismatch, unsupported ID type), the event is written to the `_mongopuff_dlq` collection in your database. The stream continues without blocking.
 
+Every entry records the source collection. An entry for a failed turbopuffer write also records the namespace it targeted and the write it attempted (`upsert`, `patch` or `delete`).
+
 Use `mongopuff dlq list` to inspect failures and `mongopuff dlq clear` to clean up after resolution.
 
 ### State

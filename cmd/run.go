@@ -189,7 +189,7 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, schema, actions); err != nil {
+		if err := w.WriteBatch(ctx, coll.Name, schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
 		slog.Info("flush",
@@ -273,7 +273,7 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 	// cancels the other, and Wait returns its error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return w.RunSpoolDelivery(gctx, sp, namespace, schema, sp.First(), signal)
+		return w.RunSpoolDelivery(gctx, sp, coll.Name, schema, sp.First(), signal)
 	})
 	g.Go(func() error {
 		return consumeStream(gctx, stream, batcher, coll, dlqWriter)

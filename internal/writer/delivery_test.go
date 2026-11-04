@@ -97,6 +97,11 @@ func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
 
 // --- helpers ---
 
+// testCollection is the MongoDB collection the tests' actions come from. It
+// differs from every test namespace, so a DLQ entry that records the namespace
+// as its collection is caught.
+const testCollection = "items"
+
 // writeSegment appends actions to the spool as its next segment.
 func writeSegment(t *testing.T, sp *spool.Spool, actions []transform.Action) {
 	t.Helper()
@@ -157,7 +162,7 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
 		close(done)
 	}()
 
@@ -204,7 +209,7 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
 		close(done)
 	}()
 
@@ -246,7 +251,7 @@ func TestRunSpoolDelivery_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
 		close(done)
 	}()
 
@@ -282,7 +287,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
 		close(done)
 	}()
 
@@ -328,7 +333,7 @@ func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {
 func startDelivery(ctx context.Context, w *Writer, sp *spool.Spool) <-chan error {
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, make(chan struct{}, 1))
+		errCh <- w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, make(chan struct{}, 1))
 	}()
 	return errCh
 }
@@ -504,7 +509,7 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
 		close(done)
 	}()
 

@@ -241,6 +241,10 @@ func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
 			if e.Operation != mongo.OpInsert {
 				t.Errorf("Operation = %q, want %q", e.Operation, mongo.OpInsert)
 			}
+			// The document failed before it became a turbopuffer write.
+			if e.Namespace != "" || e.ActionType != "" {
+				t.Errorf("Namespace, ActionType = %q, %q; want both empty", e.Namespace, e.ActionType)
+			}
 			if e.ErrorKind != tt.wantKind {
 				t.Errorf("ErrorKind = %q, want %q", e.ErrorKind, tt.wantKind)
 			}
