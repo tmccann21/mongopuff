@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/tmccann21/mongopuff/internal/batch"
 	"github.com/tmccann21/mongopuff/internal/config"
@@ -24,9 +25,11 @@ type streamEvent struct {
 	token string
 }
 
-// fakeStream replays a fixed list of events, then ends without error.
+// fakeStream replays a fixed list of events, then ends with err, which is nil
+// for a stream that ends cleanly.
 type fakeStream struct {
 	events []streamEvent
+	err    error
 	pos    int // index of the next event; the current event is pos-1
 }
 
@@ -38,11 +41,18 @@ func (s *fakeStream) Next(context.Context) bool {
 	return true
 }
 
-func (s *fakeStream) Event() (mongo.ChangeEvent, error) {
+func (s *fakeStream) Event() mongo.ChangeEvent {
 	if s.pos == 0 {
-		return mongo.ChangeEvent{}, nil
+		return mongo.ChangeEvent{}
 	}
-	return s.events[s.pos-1].event, nil
+	return s.events[s.pos-1].event
+}
+
+func (s *fakeStream) Err() error {
+	if s.pos < len(s.events) {
+		return nil
+	}
+	return s.err
 }
 
 func (s *fakeStream) ResumeToken() []byte {
@@ -110,6 +120,69 @@ func TestConsumeStream_DLQWriteFailureStopsStream(t *testing.T) {
 	}
 	if tokens := rec.getTokens(); len(tokens) != 0 {
 		t.Errorf("flushed resume tokens %q past an event that was neither written nor DLQ'd", tokens)
+	}
+}
+
+func TestConsumeStream_StreamErrorIsReturned(t *testing.T) {
+	// A stream that fails after some events stops consumeStream with its
+	// error, and the events read before it are still flushed. Only an error
+	// the server labels NonResumableChangeStreamError, which it returns when
+	// the resume token has fallen off the oplog, means the saved token is
+	// useless and the collection must be re-backfilled.
+	tests := []struct {
+		name           string
+		err            mongodriver.CommandError
+		wantRebackfill bool
+	}{
+		{
+			name: "non_resumable",
+			err: mongodriver.CommandError{
+				Code:    286,
+				Name:    "ChangeStreamHistoryLost",
+				Message: "Resume of change stream was not possible, as the resume point may no longer be in the oplog.",
+				Labels:  []string{"NonResumableChangeStreamError"},
+			},
+			wantRebackfill: true,
+		},
+		{
+			name: "unlabeled",
+			err: mongodriver.CommandError{
+				Code:    13,
+				Name:    "Unauthorized",
+				Message: "not authorized on app to execute command { getMore: 1 }",
+			},
+			wantRebackfill: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &tokenRecorder{}
+			ctx := context.Background()
+			// Thresholds above the event count, so the only flush is
+			// consumeStream's final one.
+			b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: 10, BatchFlushTimeMs: 60000}, rec.flush)
+			defer b.Close(ctx)
+
+			stream := &fakeStream{
+				events: []streamEvent{
+					{event: insertEvent(t, tenantDoc("a-1", "a")), token: "tok-a-1"},
+					{event: insertEvent(t, tenantDoc("b-1", "b")), token: "tok-b-1"},
+				},
+				err: tt.err,
+			}
+
+			err := consumeStream(ctx, stream, b, backfillCollConfig(), &recordingDLQ{})
+			var cmdErr mongodriver.CommandError
+			if !errors.As(err, &cmdErr) || cmdErr.Code != tt.err.Code {
+				t.Fatalf("consumeStream error = %v, want it to wrap %v", err, tt.err)
+			}
+			if got := errors.Is(err, errRebackfillRequired); got != tt.wantRebackfill {
+				t.Errorf("errors.Is(%v, errRebackfillRequired) = %t, want %t", err, got, tt.wantRebackfill)
+			}
+			if tokens := rec.getTokens(); !slices.Equal(tokens, []string{"tok-b-1"}) {
+				t.Errorf("flushed resume tokens %q, want %q", tokens, []string{"tok-b-1"})
+			}
+		})
 	}
 }
 

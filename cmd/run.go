@@ -89,20 +89,21 @@ func runCDC() error {
 	return nil
 }
 
+// errRebackfillRequired means the change stream cannot be resumed, so the
+// saved resume token is useless and the collection must be re-backfilled.
+var errRebackfillRequired = errors.New("oplog position lost (re-backfill required)")
+
 // changeStream is the part of *mongo.LiveChangeStream that consumeStream uses.
 type changeStream interface {
 	Next(ctx context.Context) bool
-	Event() (mongo.ChangeEvent, error)
+	Event() mongo.ChangeEvent
+	Err() error
 	ResumeToken() []byte
 }
 
 func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
 	for stream.Next(ctx) {
-		event, err := stream.Event()
-		if err != nil {
-			slog.Error("change stream event error", "collection", coll.Name, "error", err)
-			continue
-		}
+		event := stream.Event()
 
 		slog.Debug("change event",
 			"collection", coll.Name,
@@ -133,12 +134,12 @@ func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batc
 		slog.Error("final flush failed", "collection", coll.Name, "error", err)
 	}
 
-	if _, err := stream.Event(); err != nil {
+	if err := stream.Err(); err != nil {
 		var serverErr mongodriver.ServerError
 		if errors.As(err, &serverErr) && serverErr.HasErrorLabel("NonResumableChangeStreamError") {
 			slog.Error("oplog position lost: change stream is non-resumable, re-backfill required",
 				"collection", coll.Name, "error", err)
-			return fmt.Errorf("oplog position lost (re-backfill required): %w", err)
+			return fmt.Errorf("%w: %w", errRebackfillRequired, err)
 		}
 		return fmt.Errorf("change stream error: %w", err)
 	}

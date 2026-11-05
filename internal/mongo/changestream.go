@@ -69,6 +69,12 @@ func changeStreamOptions(resumeToken []byte, prePostImages bool) *options.Change
 }
 
 func (l *LiveChangeStream) Next(ctx context.Context) bool {
+	// The driver's error is sticky but a decode error is not: another call
+	// to cs.Next would move past the event that failed to decode.
+	if l.err != nil {
+		return false
+	}
+
 	if !l.cs.Next(ctx) {
 		l.err = l.cs.Err()
 		return false
@@ -101,12 +107,16 @@ func (l *LiveChangeStream) Next(ctx context.Context) bool {
 		l.current.RemovedFields = raw.UpdateDescription.RemovedFields
 	}
 
-	l.err = nil
 	return true
 }
 
-func (l *LiveChangeStream) Event() (ChangeEvent, error) {
-	return l.current, l.err
+func (l *LiveChangeStream) Event() ChangeEvent {
+	return l.current
+}
+
+// Err TODO: document.
+func (l *LiveChangeStream) Err() error {
+	return l.err
 }
 
 func (l *LiveChangeStream) ResumeToken() []byte {
