@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
@@ -158,10 +159,9 @@ func TestConsumeStream_StreamErrorIsReturned(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := &tokenRecorder{}
 			ctx := context.Background()
-			// Thresholds above the event count, so the only flush is
-			// consumeStream's final one.
+			// Thresholds above the event count, so the only flush is the
+			// one Close makes.
 			b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: 10, BatchFlushTimeMs: 60000}, rec.flush)
-			defer b.Close(ctx)
 
 			stream := &fakeStream{
 				events: []streamEvent{
@@ -179,10 +179,74 @@ func TestConsumeStream_StreamErrorIsReturned(t *testing.T) {
 			if got := errors.Is(err, errRebackfillRequired); got != tt.wantRebackfill {
 				t.Errorf("errors.Is(%v, errRebackfillRequired) = %t, want %t", err, got, tt.wantRebackfill)
 			}
+			if err := b.Close(ctx); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
 			if tokens := rec.getTokens(); !slices.Equal(tokens, []string{"tok-b-1"}) {
 				t.Errorf("flushed resume tokens %q, want %q", tokens, []string{"tok-b-1"})
 			}
 		})
+	}
+}
+
+// shutdownStream ends the way a live stream does on SIGTERM: once its events
+// run out, Next cancels the run context and returns false. Set the embedded
+// fakeStream's err to context.Canceled, which the driver's Err then reports.
+type shutdownStream struct {
+	*fakeStream
+	cancel context.CancelFunc
+}
+
+func (s shutdownStream) Next(ctx context.Context) bool {
+	if s.fakeStream.Next(ctx) {
+		return true
+	}
+	s.cancel()
+	return false
+}
+
+func TestCloseBatcher_FlushesAfterShutdown(t *testing.T) {
+	// SIGTERM cancels the run context and ends the stream with events still
+	// in the batcher. A flush on that context fails, their resume token is
+	// never saved, and a restart replays them. closeBatcher must flush them
+	// on a context that shutdown has not cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := &tokenRecorder{}
+	// Thresholds above the event count, so the only flush is closeBatcher's.
+	b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: 10, BatchFlushTimeMs: 60000}, func(
+		ctx context.Context, actions []transform.Action, resumeToken []byte,
+	) error {
+		// Like a real write, fail on a cancelled context.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return rec.flush(ctx, actions, resumeToken)
+	})
+
+	stream := shutdownStream{
+		fakeStream: &fakeStream{
+			events: []streamEvent{
+				{event: insertEvent(t, tenantDoc("a-1", "a")), token: "tok-a-1"},
+				{event: insertEvent(t, tenantDoc("b-1", "b")), token: "tok-b-1"},
+			},
+			err: context.Canceled,
+		},
+		cancel: cancel,
+	}
+
+	// consumeStream returns the stream's cancellation; this test is about
+	// what closeBatcher flushes after it.
+	_ = consumeStream(ctx, stream, b, backfillCollConfig(), &recordingDLQ{})
+
+	var err error
+	closeBatcher(ctx, b, time.Minute, &err)
+	if err != nil {
+		t.Fatalf("closeBatcher: %v", err)
+	}
+	if tokens := rec.getTokens(); !slices.Equal(tokens, []string{"tok-b-1"}) {
+		t.Errorf("saved resume tokens %q, want %q", tokens, []string{"tok-b-1"})
 	}
 }
 
@@ -201,7 +265,6 @@ func TestConsumeStream_InvalidNamespaceGoesToDLQ(t *testing.T) {
 	) error {
 		return w.WriteBatch(ctx, coll.Name, nil, actions)
 	})
-	defer b.Close(ctx)
 
 	stream := &fakeStream{events: []streamEvent{
 		{event: insertEvent(t, tenantDoc("a-1", "a")), token: "tok-a-1"},
@@ -212,6 +275,9 @@ func TestConsumeStream_InvalidNamespaceGoesToDLQ(t *testing.T) {
 
 	if err := consumeStream(ctx, stream, b, coll, dlq); err != nil {
 		t.Fatalf("consumeStream: %v", err)
+	}
+	if err := b.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
 	got := writtenDocIDs(t, tp.getCalls())
@@ -251,7 +317,6 @@ func TestConsumeStream_FailedEventGoesToDLQ(t *testing.T) {
 			) error {
 				return w.WriteBatch(ctx, coll.Name, nil, actions)
 			})
-			defer b.Close(ctx)
 
 			bad := insertEvent(t, tt.doc)
 			stream := &fakeStream{events: []streamEvent{
@@ -262,6 +327,9 @@ func TestConsumeStream_FailedEventGoesToDLQ(t *testing.T) {
 
 			if err := consumeStream(ctx, stream, b, coll, dlq); err != nil {
 				t.Fatalf("consumeStream: %v, want nil when the failed event was DLQ'd", err)
+			}
+			if err := b.Close(ctx); err != nil {
+				t.Fatalf("Close: %v", err)
 			}
 
 			got := writtenDocIDs(t, tp.getCalls())
@@ -351,8 +419,8 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 	w := writer.New(tp, dlq)
 	coll := staticCollConfig()
 
-	// Thresholds above the event count, so the only flush is consumeStream's
-	// final one and every event lands in it.
+	// Thresholds above the event count, so the only flush is the one Close
+	// makes and every event lands in it.
 	ctx := context.Background()
 	var flushes atomic.Int32
 	b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: len(events) + 1, BatchFlushTimeMs: 60000}, func(
@@ -361,10 +429,12 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 		flushes.Add(1)
 		return w.WriteBatch(ctx, coll.Name, nil, actions)
 	})
-	defer b.Close(ctx)
 
 	if err := consumeStream(ctx, &fakeStream{events: events}, b, coll, dlq); err != nil {
 		t.Fatalf("consumeStream: %v", err)
+	}
+	if err := b.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
 	if entries := dlq.getEntries(); len(entries) != 0 {

@@ -51,10 +51,9 @@ type Batcher struct {
 	closed      bool
 	err         error // first flush error; once set, no further flush runs. Written only by flushLoop.
 
-	ctx        context.Context // lifecycle context, used for timer-initiated flushes
-	flushCh    chan flushItem  // pre-drained batches from Add/Flush/Close
-	timerFired chan struct{}   // timer signals "time to flush"
-	done       chan struct{}   // closed when flushLoop exits
+	flushCh    chan flushItem // pre-drained batches from Add/Flush/Close
+	timerFired chan struct{}  // timer signals "time to flush"
+	done       chan struct{}  // closed when flushLoop exits
 }
 
 func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batcher {
@@ -62,29 +61,36 @@ func New(ctx context.Context, cfg config.GlobalConfig, flushFn FlushFunc) *Batch
 		config:     cfg,
 		flushFn:    flushFn,
 		actions:    make(map[actionKey]transform.Action),
-		ctx:        ctx,
 		flushCh:    make(chan flushItem, 2),
 		timerFired: make(chan struct{}, 1),
 		done:       make(chan struct{}),
 	}
-	go b.flushLoop()
+	go b.flushLoop(ctx)
 	return b
 }
 
-// flushLoop is the single goroutine that executes all flushFn calls.
-func (b *Batcher) flushLoop() {
+// flushLoop is the single goroutine that executes all flushFn calls. Timer
+// flushes run on ctx. The loop runs until Close, even after ctx is done, so
+// that Close can still flush.
+func (b *Batcher) flushLoop(ctx context.Context) {
 	defer close(b.done)
 	for {
 		var item flushItem
 		select {
 		case <-b.timerFired:
+			// Once ctx is done, a timer flush would fail on it after draining
+			// the batch, and Close would find nothing left to flush. Leave the
+			// batch for Close, which flushes on a context of its own.
+			if ctx.Err() != nil {
+				continue
+			}
 			b.mu.Lock()
 			pending := b.drainLocked()
 			b.mu.Unlock()
 			if pending == nil {
 				continue
 			}
-			item = flushItem{pending: pending, ctx: b.ctx} // no errCh: nobody is waiting
+			item = flushItem{pending: pending, ctx: ctx} // no errCh: nobody is waiting
 
 		case it, ok := <-b.flushCh:
 			if !ok {
@@ -195,8 +201,11 @@ func (b *Batcher) Flush(ctx context.Context) error {
 	return <-errCh
 }
 
-// Close flushes remaining data, shuts down the flush goroutine, and waits
-// for it to exit. After Close returns, Add and Flush will return errors.
+// Close flushes remaining data on ctx, shuts down the flush goroutine, and
+// waits for it to exit. After Close returns, Add and Flush will return errors.
+// It returns the batcher's first flush error, including one from a timer flush
+// that no Add or Flush reported. After a failed flush, Close flushes nothing:
+// the caller replays from its last saved resume token.
 func (b *Batcher) Close(ctx context.Context) error {
 	b.mu.Lock()
 	if b.closed {
@@ -207,16 +216,16 @@ func (b *Batcher) Close(ctx context.Context) error {
 	pending := b.drainLocked()
 	b.mu.Unlock()
 
-	var flushErr error
 	if pending != nil {
 		errCh := make(chan error, 1)
 		b.flushCh <- flushItem{pending: pending, ctx: ctx, errCh: errCh}
-		flushErr = <-errCh
+		<-errCh // also recorded in b.err, returned below
 	}
 
 	close(b.flushCh)
 	<-b.done
-	return flushErr
+	// flushLoop has exited, so b.err can no longer change.
+	return b.err
 }
 
 // drainLocked extracts the current batch and resets internal state.

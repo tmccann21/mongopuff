@@ -85,6 +85,7 @@ type GlobalConfig struct {
 	BatchFlushTimeMs int `yaml:"batchFlushTimeMs,omitempty"`
 	SpoolEnabled     bool `yaml:"spoolEnabled,omitempty"`
 	SpoolDir         string `yaml:"spoolDir,omitempty"`
+	ShutdownTimeoutMs int `yaml:"shutdownTimeoutMs,omitempty"`
 }
 
 type ConfigFile struct {
@@ -96,12 +97,22 @@ const (
 	DefaultBatchFlushCount  = 1024
 	DefaultBatchFlushTimeMs = 1000 // 1s
 	DefaultSpoolDir = "./data/spool"
+	DefaultShutdownTimeoutMs = 10000 // 10s
 )
 
 func (g GlobalConfig) FlushInterval() time.Duration {
 	ms := g.BatchFlushTimeMs
 	if ms <= 0 {
 		ms = DefaultBatchFlushTimeMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// ShutdownTimeout TODO: document.
+func (g GlobalConfig) ShutdownTimeout() time.Duration {
+	ms := g.ShutdownTimeoutMs
+	if ms <= 0 {
+		ms = DefaultShutdownTimeoutMs
 	}
 	return time.Duration(ms) * time.Millisecond
 }
@@ -113,6 +124,9 @@ func (g GlobalConfig) Effective() GlobalConfig {
 	}
 	if out.BatchFlushTimeMs <= 0 {
 		out.BatchFlushTimeMs = DefaultBatchFlushTimeMs
+	}
+	if out.ShutdownTimeoutMs <= 0 {
+		out.ShutdownTimeoutMs = DefaultShutdownTimeoutMs
 	}
 	return out
 }

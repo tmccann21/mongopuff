@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tmccann21/mongopuff/internal/config"
@@ -392,6 +393,38 @@ func TestBatchTimerFlushFailureDoesNotLoseActions(t *testing.T) {
 	if !delivered["a"] && addErr == nil && flushErr == nil {
 		t.Error("failed timer flush was neither retried nor reported by a later Add or Flush")
 	}
+}
+
+func TestBatchTimerLeavesBatchForCloseAfterCancel(t *testing.T) {
+	// At shutdown the run context is cancelled before Close makes its final
+	// flush. A timer that fires in between must not drain the batch: its flush
+	// would fail on the cancelled context, Close would find nothing left to
+	// flush, and the batch's resume token would never be saved.
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var saved []string // read only after Close, once flushLoop has exited
+		b := New(ctx, testConfig(9999, 50), func(ctx context.Context, _ []transform.Action, resumeToken []byte) error {
+			// Like a real write, fail on a cancelled context.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			saved = append(saved, string(resumeToken))
+			return nil
+		})
+
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok")); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		time.Sleep(time.Second) // well past the flush interval
+
+		if err := b.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !slices.Equal(saved, []string{"tok"}) {
+			t.Errorf("saved resume tokens %q, want %q", saved, []string{"tok"})
+		}
+	})
 }
 
 func TestBatchReusableAfterFlush(t *testing.T) {

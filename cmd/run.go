@@ -40,6 +40,13 @@ func runCDC() error {
 		return fmt.Errorf("pre-image check: %w", err)
 	}
 
+	if timeout := cfg.Global.ShutdownTimeout(); timeout > shutdownTimeoutWarnAbove {
+		slog.Warn("shutdown timeout exceeds Kubernetes' default grace period; the process may be killed before its final flush finishes",
+			"shutdownTimeout", timeout,
+			"gracePeriod", shutdownTimeoutWarnAbove,
+		)
+	}
+
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
 		"database", store.DatabaseName(),
@@ -96,6 +103,10 @@ func runCDC() error {
 	return nil
 }
 
+// shutdownTimeoutWarnAbove is Kubernetes' default termination grace period,
+// after which a pod that has not exited is killed.
+const shutdownTimeoutWarnAbove = 30 * time.Second
+
 // errRebackfillRequired means the change stream cannot be resumed, so the
 // saved resume token is useless and the collection must be re-backfilled.
 var errRebackfillRequired = errors.New("oplog position lost (re-backfill required)")
@@ -108,6 +119,9 @@ type changeStream interface {
 	ResumeToken() []byte
 }
 
+// consumeStream adds each event's actions to batcher until the stream ends.
+// It leaves the last events in batcher: the caller flushes them by closing it
+// with closeBatcher, since at shutdown ctx is already cancelled.
 func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
 	for stream.Next(ctx) {
 		event := stream.Event()
@@ -135,10 +149,6 @@ func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batc
 		if err := batcher.Add(ctx, actions, stream.ResumeToken()); err != nil {
 			return fmt.Errorf("batch flush failed: %w", err)
 		}
-	}
-
-	if err := batcher.Flush(ctx); err != nil {
-		slog.Error("final flush failed", "collection", coll.Name, "error", err)
 	}
 
 	if err := stream.Err(); err != nil {
@@ -187,8 +197,23 @@ func transformErrorKind(err error) mongo.ErrorKind {
 	}
 }
 
+// closeBatcher closes batcher, flushing the events it still holds, and joins
+// any error to *errp. The CDC paths defer it, so it usually runs at shutdown
+// with ctx already cancelled; the flush runs on a context that only timeout
+// bounds.
+func closeBatcher(ctx context.Context, batcher *batch.Batcher, timeout time.Duration, errp *error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	err := batcher.Close(ctx)
+	// Close repeats the batcher's first flush error, which *errp already
+	// carries if an Add returned it to consumeStream.
+	if err != nil && !errors.Is(*errp, err) {
+		*errp = errors.Join(*errp, fmt.Errorf("final flush: %w", err))
+	}
+}
+
 // runCDCDirect is the default path: change stream → batcher → turbopuffer.
-func (p *collectionPipeline) runCDCDirect(ctx context.Context, global config.GlobalConfig, status *health.Status) error {
+func (p *collectionPipeline) runCDCDirect(ctx context.Context, global config.GlobalConfig, status *health.Status) (err error) {
 	slog.Info("starting CDC (direct)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
 
 	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
@@ -224,12 +249,13 @@ func (p *collectionPipeline) runCDCDirect(ctx context.Context, global config.Glo
 		status.SetCollectionFlushTime(p.coll.Name, time.Now())
 		return nil
 	})
+	defer closeBatcher(ctx, batcher, global.ShutdownTimeout(), &err)
 
 	return consumeStream(ctx, stream, batcher, p.coll, p.dlq)
 }
 
 // runCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
-func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.GlobalConfig) error {
+func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.GlobalConfig) (err error) {
 	slog.Info("starting CDC (spooled)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
 
 	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
@@ -286,6 +312,9 @@ func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.Gl
 		}
 		return nil
 	})
+	// Runs after delivery has stopped and before sp.Close. The last segment
+	// stays on disk for the next run to deliver.
+	defer closeBatcher(ctx, batcher, global.ShutdownTimeout(), &err)
 
 	// Delivery and the change stream stop together: whichever fails first
 	// cancels the other, and Wait returns its error.
