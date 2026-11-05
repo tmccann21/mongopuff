@@ -134,21 +134,16 @@ func (b *Batcher) Add(ctx context.Context, actions []transform.Action, resumeTok
 		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
 	}
 
-	added := false
+	if len(actions) == 0 {
+		b.mu.Unlock()
+		return nil
+	}
 	for _, action := range actions {
-		if action.Type == transform.ActionSkip {
-			continue
-		}
 		key := actionKey{namespace: action.Namespace, documentID: action.DocumentID}
 		if _, exists := b.actions[key]; !exists {
 			b.order = append(b.order, key)
 		}
 		b.actions[key] = action
-		added = true
-	}
-	if !added {
-		b.mu.Unlock()
-		return nil
 	}
 	b.resumeToken = resumeToken
 

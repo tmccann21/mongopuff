@@ -262,44 +262,6 @@ func TestBatchEmptyNoFlush(t *testing.T) {
 	}
 }
 
-func TestBatchSkipActionIgnored(t *testing.T) {
-	spy := &flushSpy{}
-	// Count threshold of 2: if skip leaks in, adding the upsert would make count=2 and trigger a flush.
-	cfg := testConfig(2, 60000)
-	b := New(context.Background(), cfg, spy.fn())
-	defer b.Close(context.Background())
-
-	skip := transform.Action{
-		Type:       transform.ActionSkip,
-		DocumentID: "skip-me",
-		Attributes: map[string]any{"big": "data"},
-	}
-	if err := b.Add(context.Background(), []transform.Action{skip}, []byte("t1")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("t2")); err != nil {
-		t.Fatal(err)
-	}
-	if spy.callCount() != 0 {
-		t.Fatal("skip action should not have contributed to batch count")
-	}
-
-	if err := b.Flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if spy.callCount() != 1 {
-		t.Fatalf("expected 1 flush, got %d", spy.callCount())
-	}
-	actions := spy.lastCall().actions
-	if len(actions) != 1 {
-		t.Fatalf("expected 1 action (upsert only), got %d", len(actions))
-	}
-	if actions[0].DocumentID != "a" {
-		t.Errorf("expected doc ID %q, got %q", "a", actions[0].DocumentID)
-	}
-}
-
 func TestBatchPreservesInsertionOrder(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
@@ -360,6 +322,25 @@ func TestBatchFlushErrorPropagated(t *testing.T) {
 	err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok"))
 	if !errors.Is(err, flushErr) {
 		t.Errorf("expected flush error, got %v", err)
+	}
+}
+
+func TestBatchEmptyAddReturnsFlushError(t *testing.T) {
+	// A failed timer flush has no caller, so the next Add reports it and
+	// consumeStream stops. That Add may carry an event that needs no write.
+	// A count-triggered flush fails here instead, so the error is recorded
+	// before Add returns; Add checks it the same way whichever flush failed.
+	flushErr := errors.New("write failed")
+	spy := &flushSpy{err: flushErr}
+	b := New(context.Background(), testConfig(1, 60000), spy.fn())
+	defer b.Close(context.Background())
+
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok-a")); !errors.Is(err, flushErr) {
+		t.Fatalf("Add(a) = %v, want the flush error", err)
+	}
+
+	if err := b.Add(context.Background(), nil, []byte("tok-noop")); !errors.Is(err, flushErr) {
+		t.Errorf("Add(no actions) = %v, want the flush error", err)
 	}
 }
 

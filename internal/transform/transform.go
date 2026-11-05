@@ -19,7 +19,6 @@ const (
 	ActionUpsert ActionType = iota
 	ActionPatch
 	ActionDelete
-	ActionSkip
 )
 
 // Action is what gets sent to turbopuffer after transforming a change event.
@@ -76,8 +75,11 @@ func SerializeClusterTime(t uint32, i uint32) uint64 {
 	return uint64(t)<<32 | uint64(i)
 }
 
-// MapChangeEvent converts a change stream event into a turbopuffer Action
-// according to the collection's field mapping config.
+// MapChangeEvent converts a change stream event into the turbopuffer Actions
+// it requires, according to the collection's field mapping config. An event
+// that needs no write produces no Actions, a namespace transition produces a
+// delete from the old namespace followed by an upsert into the new one, and
+// every other event produces one Action.
 func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	switch event.Operation {
 	case mongo.OpInsert, mongo.OpReplace:
@@ -89,17 +91,12 @@ func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Ac
 	case mongo.OpUpdate:
 		return mapUpdate(event, coll)
 	case mongo.OpDelete:
-		action, err := mapDelete(event, coll)
-		if err != nil {
-			return nil, err
-		}
-		return []Action{action}, nil
+		return mapDelete(event, coll)
 	case mongo.OpInvalidate:
 		return nil, fmt.Errorf("change stream invalidated: resume token is no longer valid, re-backfill required")
-	case mongo.OpRename, mongo.OpDrop:
-		return []Action{{Type: ActionSkip}}, nil
 	default:
-		return []Action{{Type: ActionSkip}}, nil
+		// Rename, drop, and any operation not handled above need no write.
+		return nil, nil
 	}
 }
 
@@ -174,11 +171,7 @@ func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action,
 		}
 	}
 
-	action, err := mapPatch(event, coll)
-	if err != nil {
-		return nil, err
-	}
-	return []Action{action}, nil
+	return mapPatch(event, coll)
 }
 
 func mapNamespaceTransition(event mongo.ChangeEvent, coll config.CollectionConfig, oldNS, newNS string) ([]Action, error) {
@@ -210,15 +203,15 @@ func mapNamespaceTransition(event mongo.ChangeEvent, coll config.CollectionConfi
 	return []Action{del, ups}, nil
 }
 
-func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
 	attrs, err := extractFields(event.UpdatedFields, coll.Mapping.Fields)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
 	// Removed fields are explicitly nulled in turbopuffer.
@@ -232,46 +225,46 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 	}
 
 	if len(attrs) == 0 {
-		return Action{Type: ActionSkip}, nil
+		return nil, nil
 	}
 
 	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
-	return Action{
+	return []Action{{
 		Type:        ActionPatch,
 		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: event.ClusterTime,
-	}, nil
+	}}, nil
 }
 
-func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	if !coll.MirrorDeletesEnabled() {
-		return Action{Type: ActionSkip}, nil
+		return nil, nil
 	}
 
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
 	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
-	return Action{
+	return []Action{{
 		Type:        ActionDelete,
 		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		ClusterTime: event.ClusterTime,
-	}, nil
+	}}, nil
 }
 
 func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string]any, error) {

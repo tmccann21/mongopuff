@@ -536,9 +536,8 @@ func TestMapChangeEvent_UpdateUnmappedFieldsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action := actions[0]
-	if action.Type != ActionSkip {
-		t.Errorf("got action type %d, want ActionSkip", action.Type)
+	if len(actions) != 0 {
+		t.Errorf("got %+v, want no actions", actions)
 	}
 }
 
@@ -601,9 +600,8 @@ func TestMapChangeEvent_DeleteMirrorDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action := actions[0]
-	if action.Type != ActionSkip {
-		t.Errorf("got action type %d, want ActionSkip when mirrorDeletes is false", action.Type)
+	if len(actions) != 0 {
+		t.Errorf("got %+v, want no actions when mirrorDeletes is false", actions)
 	}
 }
 
@@ -627,9 +625,8 @@ func TestMapChangeEvent_Rename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action := actions[0]
-	if action.Type != ActionSkip {
-		t.Errorf("got action type %d, want ActionSkip for rename", action.Type)
+	if len(actions) != 0 {
+		t.Errorf("got %+v, want no actions for rename", actions)
 	}
 }
 
@@ -642,9 +639,8 @@ func TestMapChangeEvent_Drop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action := actions[0]
-	if action.Type != ActionSkip {
-		t.Errorf("got action type %d, want ActionSkip for drop", action.Type)
+	if len(actions) != 0 {
+		t.Errorf("got %+v, want no actions for drop", actions)
 	}
 }
 
