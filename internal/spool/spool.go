@@ -71,6 +71,13 @@ func (s *Spool) Append(data []byte) (uint32, error) {
 		tmp.Close()
 		return 0, fmt.Errorf("spool append: %w", err)
 	}
+	// The data must reach disk before the segment's name does. Otherwise a
+	// crash can leave the name pointing at an empty or partial file, which
+	// delivery cannot decode.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return 0, fmt.Errorf("spool append: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return 0, fmt.Errorf("spool append: %w", err)
 	}
@@ -81,6 +88,13 @@ func (s *Spool) Append(data []byte) (uint32, error) {
 		return 0, fmt.Errorf("spool append segment %d: %w", seg, err)
 	}
 	s.next++
+
+	// The caller saves the segment's resume token once Append returns, which
+	// leaves the segment as the only copy of its events. Its name has to
+	// survive a crash.
+	if err := syncDir(s.dir); err != nil {
+		return 0, fmt.Errorf("spool append segment %d: %w", seg, err)
+	}
 	return seg, nil
 }
 
@@ -96,6 +110,12 @@ func (s *Spool) Remove(segment uint32) error {
 	if err := os.Remove(s.path(segment)); err != nil {
 		return fmt.Errorf("spool remove: %w", err)
 	}
+	// A delivered segment whose removal is lost in a crash is delivered again
+	// on the next run, after the segments that followed it, and its upserts
+	// can bring back documents those segments deleted.
+	if err := syncDir(s.dir); err != nil {
+		return fmt.Errorf("spool remove segment %d: %w", segment, err)
+	}
 	return nil
 }
 
@@ -110,6 +130,17 @@ func (s *Spool) Close() error {
 
 func (s *Spool) path(segment uint32) string {
 	return filepath.Join(s.dir, fmt.Sprintf("%06d.spool", segment))
+}
+
+// syncDir fsyncs dir so that names added to or removed from it survive a
+// crash. Syncing a file makes its contents durable but not its name.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // listSegments returns the segment numbers in dir in ascending order, ignoring
