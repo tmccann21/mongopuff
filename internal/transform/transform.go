@@ -2,6 +2,7 @@ package transform
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -31,12 +32,21 @@ type Action struct {
 	ClusterTime uint64
 }
 
+var (
+	// ErrInvalidID TODO: document.
+	ErrInvalidID = errors.New("invalid _id")
+	// ErrNamespaceUnresolved TODO: document.
+	ErrNamespaceUnresolved = errors.New("namespace unresolved")
+	// ErrTypeMismatch TODO: document.
+	ErrTypeMismatch = errors.New("type mismatch")
+)
+
 // SerializeID converts a BSON _id value to a string for use as a turbopuffer document ID.
 // Supported types: ObjectID, string, int32, int64, Binary with UUID subtype.
 // All other types are rejected.
 func SerializeID(id any) (string, error) {
 	if id == nil {
-		return "", fmt.Errorf("_id is nil")
+		return "", fmt.Errorf("%w: nil", ErrInvalidID)
 	}
 
 	switch v := id.(type) {
@@ -50,14 +60,14 @@ func SerializeID(id any) (string, error) {
 		return strconv.FormatInt(v, 10), nil
 	case bson.Binary:
 		if v.Subtype != bson.TypeBinaryUUID {
-			return "", fmt.Errorf("unsupported _id binary subtype: 0x%02x", v.Subtype)
+			return "", fmt.Errorf("%w: unsupported binary subtype 0x%02x", ErrInvalidID, v.Subtype)
 		}
 		if len(v.Data) != 16 {
-			return "", fmt.Errorf("UUID binary _id has invalid length %d, expected 16", len(v.Data))
+			return "", fmt.Errorf("%w: UUID binary has invalid length %d, expected 16", ErrInvalidID, len(v.Data))
 		}
 		return formatUUID(v.Data), nil
 	default:
-		return "", fmt.Errorf("unsupported _id type: %T", id)
+		return "", fmt.Errorf("%w: unsupported type %T", ErrInvalidID, id)
 	}
 }
 
@@ -276,7 +286,7 @@ func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string
 		}
 		coerced, err := coerceValue(val, f)
 		if err != nil {
-			return nil, fmt.Errorf("field %q: %w", f.Name, err)
+			return nil, fmt.Errorf("field %q: %w: %w", f.Name, ErrTypeMismatch, err)
 		}
 		attrs[f.Name] = coerced
 	}
@@ -335,7 +345,7 @@ func coerceFloat(val any) (any, error) {
 	case int64:
 		return float64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to float", val)
+		return nil, fmt.Errorf("cannot coerce %T to float", val)
 	}
 }
 
@@ -347,11 +357,11 @@ func coerceInt(val any) (any, error) {
 		return v, nil
 	case float64:
 		if v != math.Trunc(v) {
-			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to int", v)
+			return nil, fmt.Errorf("float64 %v has fractional part, cannot coerce to int", v)
 		}
 		return int64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to int", val)
+		return nil, fmt.Errorf("cannot coerce %T to int", val)
 	}
 }
 
@@ -359,37 +369,37 @@ func coerceUint(val any) (any, error) {
 	switch v := val.(type) {
 	case int32:
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %d cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	case int64:
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %d cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	case float64:
 		if v != math.Trunc(v) {
-			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to uint", v)
+			return nil, fmt.Errorf("float64 %v has fractional part, cannot coerce to uint", v)
 		}
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %v cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %v cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to uint", val)
+		return nil, fmt.Errorf("cannot coerce %T to uint", val)
 	}
 }
 
 func coerceString(val any) (any, error) {
 	if _, ok := val.(string); !ok {
-		return nil, fmt.Errorf("type mismatch: expected string, got %T", val)
+		return nil, fmt.Errorf("expected string, got %T", val)
 	}
 	return val, nil
 }
 
 func coerceBool(val any) (any, error) {
 	if _, ok := val.(bool); !ok {
-		return nil, fmt.Errorf("type mismatch: expected bool, got %T", val)
+		return nil, fmt.Errorf("expected bool, got %T", val)
 	}
 	return val, nil
 }
@@ -397,20 +407,20 @@ func coerceBool(val any) (any, error) {
 func coerceUUID(val any) (any, error) {
 	v, ok := val.(bson.Binary)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected Binary, got %T", val)
+		return nil, fmt.Errorf("expected Binary, got %T", val)
 	}
 	if v.Subtype != bson.TypeBinaryUUID {
-		return nil, fmt.Errorf("type mismatch: expected UUID binary subtype, got 0x%02x", v.Subtype)
+		return nil, fmt.Errorf("expected UUID binary subtype, got 0x%02x", v.Subtype)
 	}
 	if len(v.Data) != 16 {
-		return nil, fmt.Errorf("type mismatch: UUID binary has invalid length %d, expected 16", len(v.Data))
+		return nil, fmt.Errorf("UUID binary has invalid length %d, expected 16", len(v.Data))
 	}
 	return formatUUID(v.Data), nil
 }
 
 func coerceDatetime(val any) (any, error) {
 	if _, ok := val.(time.Time); !ok {
-		return nil, fmt.Errorf("type mismatch: expected datetime, got %T", val)
+		return nil, fmt.Errorf("expected datetime, got %T", val)
 	}
 	return val, nil
 }
@@ -418,10 +428,10 @@ func coerceDatetime(val any) (any, error) {
 func coerceVector(val any, dimension int) (any, error) {
 	arr, ok := val.(bson.A)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected array for vector, got %T", val)
+		return nil, fmt.Errorf("expected array for vector, got %T", val)
 	}
 	if len(arr) != dimension {
-		return nil, fmt.Errorf("type mismatch: vector dimension %d does not match expected %d", len(arr), dimension)
+		return nil, fmt.Errorf("vector dimension %d does not match expected %d", len(arr), dimension)
 	}
 	result := make([]float32, len(arr))
 	for i, elem := range arr {
@@ -433,7 +443,7 @@ func coerceVector(val any, dimension int) (any, error) {
 		case int64:
 			result[i] = float32(v)
 		default:
-			return nil, fmt.Errorf("element [%d]: type mismatch: expected numeric, got %T", i, elem)
+			return nil, fmt.Errorf("element [%d]: expected numeric, got %T", i, elem)
 		}
 	}
 	return result, nil
@@ -442,7 +452,7 @@ func coerceVector(val any, dimension int) (any, error) {
 func coerceArray(val any, coerceFn func(any) (any, error)) (any, error) {
 	arr, ok := val.(bson.A)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected array, got %T", val)
+		return nil, fmt.Errorf("expected array, got %T", val)
 	}
 	result := make([]any, len(arr))
 	for i, elem := range arr {

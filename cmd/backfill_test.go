@@ -161,35 +161,44 @@ func TestBackfillPage_OneCallPerNamespace(t *testing.T) {
 	}
 }
 
-func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
-	// Any document that cannot be transformed is DLQ'd with the same error
-	// classification the change stream uses, and the rest of the page is
-	// written. Stopping instead strands the backfill: the cursor never moves
-	// past the bad document, so every rerun fails on it again.
-	tests := []struct {
-		name     string
-		doc      bson.D
-		wantID   string
-		wantKind mongo.ErrorKind
-	}{
+// transformFailureCase is a document that fails to transform under
+// backfillCollConfig, and the DLQ entry it should produce.
+type transformFailureCase struct {
+	name     string
+	doc      bson.D
+	wantID   string
+	wantKind mongo.ErrorKind
+}
+
+// transformFailureCases are shared by the backfill and change stream tests,
+// which must classify a failure the same way.
+func transformFailureCases(t *testing.T) []transformFailureCase {
+	t.Helper()
+	return []transformFailureCase{
 		{
 			name:     "namespace_field_absent",
 			doc:      bson.D{{Key: "_id", Value: "bad"}, {Key: "name", Value: "bad"}},
 			wantID:   "bad",
-			wantKind: mongo.ErrTypeMismatch,
+			wantKind: mongo.ErrNamespaceUnresolved,
 		},
 		{
 			name:     "namespace_field_null",
 			doc:      bson.D{{Key: "_id", Value: "bad"}, {Key: "tenant", Value: nil}, {Key: "name", Value: "bad"}},
 			wantID:   "bad",
-			wantKind: mongo.ErrTypeMismatch,
+			wantKind: mongo.ErrNamespaceUnresolved,
+		},
+		{
+			name:     "namespace_value_unsupported_type",
+			doc:      bson.D{{Key: "_id", Value: "bad"}, {Key: "tenant", Value: true}, {Key: "name", Value: "bad"}},
+			wantID:   "bad",
+			wantKind: mongo.ErrNamespaceUnresolved,
 		},
 		{
 			// Resolves to "items_acme corp", which turbopuffer rejects.
 			name:     "namespace_value_invalid_name",
 			doc:      tenantDoc("bad", "acme corp"),
 			wantID:   "bad",
-			wantKind: mongo.ErrTypeMismatch,
+			wantKind: mongo.ErrNamespaceUnresolved,
 		},
 		{
 			name:     "mapped_field_type_mismatch",
@@ -206,8 +215,14 @@ func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
 			wantKind: mongo.ErrIDMissing,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
+	// Any document that cannot be transformed is DLQ'd with the same error
+	// classification the change stream uses, and the rest of the page is
+	// written. Stopping instead strands the backfill: the cursor never moves
+	// past the bad document, so every rerun fails on it again.
+	for _, tt := range transformFailureCases(t) {
 		t.Run(tt.name, func(t *testing.T) {
 			tp := &fakeTpuf{}
 			dlq := &recordingDLQ{}

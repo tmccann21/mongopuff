@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -441,6 +442,207 @@ func TestMapDocument_DynamicNamespaceMissingFieldReturnsError(t *testing.T) {
 	doc := map[string]any{"_id": mustObjectID("507f1f77bcf86cd799439011"), "name": "alice"} // tenant absent
 	if _, err := MapDocument(doc, SerializeClusterTime(10, 1), testDynColl(dynTestFields)); err == nil {
 		t.Fatal("expected error when namespace field is absent, got nil")
+	}
+}
+
+// --- Failure Classification ---
+
+// checkSentinel fails unless err wraps want and none of the other sentinels,
+// since the DLQ classifies a failure by the first sentinel it finds.
+func checkSentinel(t *testing.T, err, want error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("got nil error, want one wrapping %q", want)
+	}
+	for _, s := range []error{ErrInvalidID, ErrNamespaceUnresolved, ErrTypeMismatch} {
+		if got := errors.Is(err, s); got != (s == want) {
+			t.Errorf("errors.Is(%q, %q) = %v, want %v", err, s, got, !got)
+		}
+	}
+}
+
+// Every way a change event can fail on its document wraps the sentinel for
+// that failure, on every operation path.
+func TestMapChangeEvent_FailureWrapsSentinel(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+	good := bson.D{{Key: "tenant", Value: "acme"}, {Key: "name", Value: "alice"}}
+
+	tests := []struct {
+		name  string
+		event mongo.ChangeEvent
+		want  error
+	}{
+		{
+			name: "insert_id_unsupported",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpInsert,
+				DocumentID:   mustDecimal128(t, "1.5"),
+				FullDocument: decodedDoc(t, good),
+			},
+			want: ErrInvalidID,
+		},
+		{
+			name: "insert_namespace_field_absent",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpInsert,
+				DocumentID:   oid,
+				FullDocument: decodedDoc(t, bson.D{{Key: "name", Value: "alice"}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			// coerceInt rejects the value, but it is a namespace failure, not
+			// a mapped field's type mismatch.
+			name: "insert_namespace_value_fractional",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpInsert,
+				DocumentID:   oid,
+				FullDocument: decodedDoc(t, bson.D{{Key: "tenant", Value: 1.5}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "insert_namespace_name_invalid",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpInsert,
+				DocumentID:   oid,
+				FullDocument: decodedDoc(t, bson.D{{Key: "tenant", Value: "acme corp"}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "insert_field_type_mismatch",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpInsert,
+				DocumentID:   oid,
+				FullDocument: decodedDoc(t, bson.D{{Key: "tenant", Value: "acme"}, {Key: "name", Value: int32(7)}}),
+			},
+			want: ErrTypeMismatch,
+		},
+		{
+			name: "replace_namespace_field_null",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpReplace,
+				DocumentID:   oid,
+				FullDocument: decodedDoc(t, bson.D{{Key: "tenant", Value: nil}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "update_pre_image_namespace_absent",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: decodedDoc(t, bson.D{{Key: "name", Value: "alice"}}),
+				FullDocument:             decodedDoc(t, good),
+				UpdatedFields:            decodedDoc(t, bson.D{{Key: "name", Value: "carol"}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "update_post_image_absent",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: decodedDoc(t, good),
+				UpdatedFields:            decodedDoc(t, bson.D{{Key: "name", Value: "carol"}}),
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "update_transition_field_type_mismatch",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: decodedDoc(t, good),
+				FullDocument:             decodedDoc(t, bson.D{{Key: "tenant", Value: "globex"}, {Key: "name", Value: int32(7)}}),
+				UpdatedFields:            decodedDoc(t, bson.D{{Key: "tenant", Value: "globex"}, {Key: "name", Value: int32(7)}}),
+			},
+			want: ErrTypeMismatch,
+		},
+		{
+			name: "update_patch_field_type_mismatch",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: decodedDoc(t, good),
+				FullDocument:             decodedDoc(t, bson.D{{Key: "tenant", Value: "acme"}, {Key: "name", Value: int32(7)}}),
+				UpdatedFields:            decodedDoc(t, bson.D{{Key: "name", Value: int32(7)}}),
+			},
+			want: ErrTypeMismatch,
+		},
+		{
+			name: "update_patch_id_unsupported",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               mustDecimal128(t, "1.5"),
+				FullDocumentBeforeChange: decodedDoc(t, good),
+				FullDocument:             decodedDoc(t, good),
+				UpdatedFields:            decodedDoc(t, bson.D{{Key: "name", Value: "carol"}}),
+			},
+			want: ErrInvalidID,
+		},
+		{
+			name: "delete_pre_image_absent",
+			event: mongo.ChangeEvent{
+				Operation:  mongo.OpDelete,
+				DocumentID: oid,
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "delete_id_unsupported",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpDelete,
+				DocumentID:               mustDecimal128(t, "1.5"),
+				FullDocumentBeforeChange: decodedDoc(t, good),
+			},
+			want: ErrInvalidID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actions, err := MapChangeEvent(tt.event, testDynColl(dynTestFields))
+			if err == nil {
+				t.Fatalf("got actions %+v, want an error wrapping %q", actions, tt.want)
+			}
+			checkSentinel(t, err, tt.want)
+		})
+	}
+}
+
+func TestMapDocument_FailureWrapsSentinel(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  bson.D
+		want error
+	}{
+		{
+			name: "id_unsupported",
+			doc:  bson.D{{Key: "_id", Value: mustDecimal128(t, "1.5")}, {Key: "tenant", Value: "acme"}},
+			want: ErrInvalidID,
+		},
+		{
+			name: "namespace_field_absent",
+			doc:  bson.D{{Key: "_id", Value: "doc-1"}, {Key: "name", Value: "alice"}},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			name: "field_type_mismatch",
+			doc:  bson.D{{Key: "_id", Value: "doc-1"}, {Key: "tenant", Value: "acme"}, {Key: "name", Value: int32(7)}},
+			want: ErrTypeMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action, err := MapDocument(decodedDoc(t, tt.doc), SerializeClusterTime(10, 1), testDynColl(dynTestFields))
+			if err == nil {
+				t.Fatalf("got action %+v, want an error wrapping %q", action, tt.want)
+			}
+			checkSentinel(t, err, tt.want)
+		})
 	}
 }
 

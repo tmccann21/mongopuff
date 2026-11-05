@@ -11,15 +11,21 @@ import (
 )
 
 // resolveNamespace resolves ns against doc. A {{field}} that is absent from
-// doc or null fails, as does a value formatNamespaceValue rejects.
+// doc or null fails, as does a value formatNamespaceValue rejects or a
+// resolved name that breaks turbopuffer's rules. Every failure wraps
+// ErrNamespaceUnresolved.
 func resolveNamespace(ns config.Namespace, doc map[string]any) (string, error) {
-	return ns.Resolve(func(field string) (string, error) {
+	name, err := ns.Resolve(func(field string) (string, error) {
 		val, ok := doc[field]
 		if !ok || val == nil {
 			return "", errors.New("absent or null")
 		}
 		return formatNamespaceValue(val)
 	})
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrNamespaceUnresolved, err)
+	}
+	return name, nil
 }
 
 // formatNamespaceValue formats a {{field}} value as namespace text. It accepts

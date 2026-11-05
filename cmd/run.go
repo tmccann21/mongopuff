@@ -149,21 +149,33 @@ func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batc
 // transformed. The change stream and backfill share it so that a failure is
 // classified the same way on both paths.
 func transformFailureEntry(collection string, id any, op mongo.Operation, clusterTime uint64, transformErr error) mongo.DLQEntry {
-	docID, idErr := transform.SerializeID(id)
-	errKind := mongo.ErrTypeMismatch
-	if idErr != nil {
+	docID, err := transform.SerializeID(id)
+	if err != nil {
 		// Fall back to the printed _id so an operator can still find the document.
 		docID = fmt.Sprintf("%v", id)
-		errKind = mongo.ErrIDMissing
 	}
 	return mongo.DLQEntry{
 		Collection:   collection,
 		DocumentID:   docID,
 		Operation:    op,
-		ErrorKind:    errKind,
+		ErrorKind:    transformErrorKind(transformErr),
 		ErrorMessage: transformErr.Error(),
 		ClusterTime:  clusterTime,
 		CreatedAt:    time.Now(),
+	}
+}
+
+// transformErrorKind classifies a transform failure by the sentinel it wraps.
+func transformErrorKind(err error) mongo.ErrorKind {
+	switch {
+	case errors.Is(err, transform.ErrInvalidID):
+		return mongo.ErrIDMissing
+	case errors.Is(err, transform.ErrNamespaceUnresolved):
+		return mongo.ErrNamespaceUnresolved
+	case errors.Is(err, transform.ErrTypeMismatch):
+		return mongo.ErrTypeMismatch
+	default:
+		return mongo.ErrUnknown
 	}
 }
 

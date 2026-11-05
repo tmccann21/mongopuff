@@ -157,6 +157,87 @@ func TestConsumeStream_InvalidNamespaceGoesToDLQ(t *testing.T) {
 	if e := entries[0]; e.DocumentID != "bad" || e.Collection != "items" {
 		t.Errorf("DLQ entry DocumentID, Collection = %q, %q; want %q, %q", e.DocumentID, e.Collection, "bad", "items")
 	}
+	if e := entries[0]; e.ErrorKind != mongo.ErrNamespaceUnresolved {
+		t.Errorf("ErrorKind = %q, want %q", e.ErrorKind, mongo.ErrNamespaceUnresolved)
+	}
+}
+
+func TestConsumeStream_FailedEventGoesToDLQ(t *testing.T) {
+	// An event that cannot be transformed is DLQ'd with the same error
+	// classification backfill uses, and the events around it are written.
+	for _, tt := range transformFailureCases(t) {
+		t.Run(tt.name, func(t *testing.T) {
+			tp := &fakeTpuf{}
+			dlq := &recordingDLQ{}
+			w := writer.New(tp, dlq)
+			coll := backfillCollConfig()
+
+			ctx := context.Background()
+			b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: 10, BatchFlushTimeMs: 60000}, func(
+				ctx context.Context, actions []transform.Action, _ []byte,
+			) error {
+				return w.WriteBatch(ctx, coll.Name, nil, actions)
+			})
+			defer b.Close(ctx)
+
+			bad := insertEvent(t, tt.doc)
+			stream := &fakeStream{events: []streamEvent{
+				{event: insertEvent(t, tenantDoc("a-1", "a")), token: "tok-a-1"},
+				{event: bad, token: "tok-bad"},
+				{event: insertEvent(t, tenantDoc("b-1", "b")), token: "tok-b-1"},
+			}}
+
+			if err := consumeStream(ctx, stream, b, coll, dlq); err != nil {
+				t.Fatalf("consumeStream: %v, want nil when the failed event was DLQ'd", err)
+			}
+
+			got := writtenDocIDs(t, tp.getCalls())
+			want := map[string][]string{
+				"items_a": {"a-1"},
+				"items_b": {"b-1"},
+			}
+			if !maps.EqualFunc(got, want, slices.Equal) {
+				t.Errorf("written doc IDs = %v, want %v", got, want)
+			}
+
+			entries := dlq.getEntries()
+			if len(entries) != 1 {
+				t.Fatalf("got %d DLQ entries, want 1: %+v", len(entries), entries)
+			}
+			e := entries[0]
+			if e.Collection != "items" {
+				t.Errorf("Collection = %q, want %q", e.Collection, "items")
+			}
+			if e.DocumentID != tt.wantID {
+				t.Errorf("DocumentID = %q, want %q", e.DocumentID, tt.wantID)
+			}
+			if e.Operation != mongo.OpInsert {
+				t.Errorf("Operation = %q, want %q", e.Operation, mongo.OpInsert)
+			}
+			// The event failed before it became a turbopuffer write.
+			if e.Namespace != "" || e.ActionType != "" {
+				t.Errorf("Namespace, ActionType = %q, %q; want both empty", e.Namespace, e.ActionType)
+			}
+			if e.ErrorKind != tt.wantKind {
+				t.Errorf("ErrorKind = %q, want %q", e.ErrorKind, tt.wantKind)
+			}
+			if e.ErrorMessage == "" {
+				t.Error("ErrorMessage is empty")
+			}
+			if e.ClusterTime != bad.ClusterTime {
+				t.Errorf("ClusterTime = %d, want %d", e.ClusterTime, bad.ClusterTime)
+			}
+		})
+	}
+}
+
+func TestTransformErrorKind_Unclassified(t *testing.T) {
+	// An error that wraps none of transform's sentinels is reported as unknown
+	// rather than guessed at.
+	err := fmt.Errorf("wrapped: %w", errors.New("no sentinel"))
+	if got := transformErrorKind(err); got != mongo.ErrUnknown {
+		t.Errorf("transformErrorKind(%v) = %q, want %q", err, got, mongo.ErrUnknown)
+	}
 }
 
 func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {

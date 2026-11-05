@@ -20,12 +20,14 @@ const (
 type ErrorKind string
 
 const (
-	ErrTypeMismatch  ErrorKind = "type_mismatch"
-	ErrIDMissing     ErrorKind = "id_missing"
-	ErrWriteRejected ErrorKind = "write_rejected"
-	ErrNetworkError  ErrorKind = "network_error"
-	ErrRateLimited   ErrorKind = "rate_limited"
-	ErrServerError   ErrorKind = "server_error"
+	ErrTypeMismatch        ErrorKind = "type_mismatch"
+	ErrIDMissing           ErrorKind = "id_missing"
+	ErrNamespaceUnresolved ErrorKind = "namespace_unresolved"
+	ErrUnknown             ErrorKind = "unknown"
+	ErrWriteRejected       ErrorKind = "write_rejected"
+	ErrNetworkError        ErrorKind = "network_error"
+	ErrRateLimited         ErrorKind = "rate_limited"
+	ErrServerError         ErrorKind = "server_error"
 )
 
 // DLQActionType is the turbopuffer write that a DLQ entry's action failed to
