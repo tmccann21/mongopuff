@@ -10,12 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
 	"github.com/tmccann21/mongopuff/internal/turbopuffer"
 	"github.com/tmccann21/mongopuff/internal/writer"
-	tpuf "github.com/turbopuffer/turbopuffer-go/v2"
 )
 
 func runBackfill() error {
@@ -44,22 +42,30 @@ func runBackfill() error {
 	}
 
 	dlqWriter := store.NewDLQWriter()
-	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, cfg.TurbopufferRegion), dlqWriter)
+	p := &collectionPipeline{
+		coll:   collCfg,
+		schema: turbopuffer.BuildSchema(collCfg.Mapping.Fields),
+		writer: writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, cfg.TurbopufferRegion), dlqWriter),
+		dlq:    dlqWriter,
+		store:  store,
+	}
+	return p.backfill(ctx)
+}
 
-	schema := turbopuffer.BuildSchema(collCfg.Mapping.Fields)
-
-	slog.Info("starting backfill", "collection", collCfg.Name)
-	scanner := store.CollectionScanner(collCfg.Name)
-	state, err := store.LoadCollectionState(ctx, collCfg.Name)
+// backfill TODO: document.
+func (p *collectionPipeline) backfill(ctx context.Context) error {
+	slog.Info("starting backfill", "collection", p.coll.Name)
+	scanner := p.store.CollectionScanner(p.coll.Name)
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 	lastID := state.BackfillCursor
-	pageSize := collCfg.EffectiveBackfillPageSize()
+	pageSize := p.coll.EffectiveBackfillPageSize()
 	page := 0
 	for {
 		page++
-		opTime, err := store.PingOperationTime(ctx)
+		opTime, err := p.store.PingOperationTime(ctx)
 		if err != nil {
 			return fmt.Errorf("ping operation time: %w", err)
 		}
@@ -70,26 +76,26 @@ func runBackfill() error {
 		}
 
 		if len(docs) == 0 {
-			slog.Info("backfill complete", "collection", collCfg.Name, "pages", page-1)
+			slog.Info("backfill complete", "collection", p.coll.Name, "pages", page-1)
 			break
 		}
 
 		slog.Info("scanned page",
-			"collection", collCfg.Name,
+			"collection", p.coll.Name,
 			"page", page,
 			"pageSize", pageSize,
 			"docs", len(docs),
 			"cursor", lastID,
 		)
-		if err := backfillPage(ctx, w, dlqWriter, schema, collCfg, docs, opTime); err != nil {
+		if err := p.backfillPage(ctx, docs, opTime); err != nil {
 			return err
 		}
 		lastID = docs[len(docs)-1]["_id"]
 
-		if err := store.SaveBackfillCursor(ctx, collCfg.Name, lastID); err != nil {
+		if err := p.store.SaveBackfillCursor(ctx, p.coll.Name, lastID); err != nil {
 			return fmt.Errorf("saving backfill cursor: %w", err)
 		}
-		slog.Info("page written", "collection", collCfg.Name, "page", page, "cursor", lastID)
+		slog.Info("page written", "collection", p.coll.Name, "page", page, "cursor", lastID)
 	}
 
 	return nil
@@ -102,25 +108,25 @@ func runBackfill() error {
 //
 // Failed documents are DLQ'd before anything is written to turbopuffer, so an
 // unavailable DLQ fails the page without spending writes on it.
-func backfillPage(ctx context.Context, w *writer.Writer, dlq mongo.DLQWriter, schema map[string]tpuf.AttributeSchemaConfigParam, coll config.CollectionConfig, docs []map[string]any, opTime uint64) error {
+func (p *collectionPipeline) backfillPage(ctx context.Context, docs []map[string]any, opTime uint64) error {
 	actions := make([]transform.Action, 0, len(docs))
 	var failed []mongo.DLQEntry
 	for _, doc := range docs {
-		action, err := transform.MapDocument(doc, opTime, coll)
+		action, err := transform.MapDocument(doc, opTime, p.coll)
 		if err != nil {
-			slog.Error("transform error", "collection", coll.Name, "documentId", doc["_id"], "error", err)
+			slog.Error("transform error", "collection", p.coll.Name, "documentId", doc["_id"], "error", err)
 			// action is zero on error; OpInsert matches what MapDocument stamps on success.
-			failed = append(failed, transformFailureEntry(coll.Name, doc["_id"], mongo.OpInsert, opTime, err))
+			failed = append(failed, transformFailureEntry(p.coll.Name, doc["_id"], mongo.OpInsert, opTime, err))
 			continue
 		}
 		actions = append(actions, action)
 	}
 
-	if err := dlq.Write(ctx, failed...); err != nil {
+	if err := p.dlq.Write(ctx, failed...); err != nil {
 		return fmt.Errorf("DLQ write for %d documents: %w", len(failed), err)
 	}
 
-	if err := w.WriteBatch(ctx, coll.Name, schema, actions); err != nil {
+	if err := p.writer.WriteBatch(ctx, p.coll.Name, p.schema, actions); err != nil {
 		return fmt.Errorf("write batch: %w", err)
 	}
 	return nil

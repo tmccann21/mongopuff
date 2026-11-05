@@ -148,7 +148,8 @@ func TestBackfillPage_OneCallPerNamespace(t *testing.T) {
 		tenantDoc("a-2", "a"),
 	)
 
-	if err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime); err != nil {
+	p := &collectionPipeline{coll: backfillCollConfig(), writer: w, dlq: dlq}
+	if err := p.backfillPage(context.Background(), page, backfillOpTime); err != nil {
 		t.Fatalf("backfillPage: %v", err)
 	}
 
@@ -246,7 +247,8 @@ func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
 				tenantDoc("b-1", "b"),
 			)
 
-			if err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime); err != nil {
+			p := &collectionPipeline{coll: backfillCollConfig(), writer: w, dlq: dlq}
+			if err := p.backfillPage(context.Background(), page, backfillOpTime); err != nil {
 				t.Fatalf("backfillPage: %v, want nil when the failed document was DLQ'd", err)
 			}
 
@@ -303,7 +305,8 @@ func TestBackfillPage_DLQWriteFailureFailsPage(t *testing.T) {
 		bson.D{{Key: "_id", Value: "bad"}, {Key: "name", Value: "bad"}},
 	)
 
-	err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime)
+	p := &collectionPipeline{coll: backfillCollConfig(), writer: w, dlq: dlq}
+	err := p.backfillPage(context.Background(), page, backfillOpTime)
 	if !errors.Is(err, dlqErr) {
 		t.Fatalf("backfillPage error = %v, want it to wrap %v", err, dlqErr)
 	}
@@ -327,7 +330,8 @@ func TestBackfillPage_FailedDocumentsAreOneDLQCall(t *testing.T) {
 		bson.D{{Key: "_id", Value: "bad-2"}, {Key: "name", Value: "bad-2"}},
 	)
 
-	if err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime); err != nil {
+	p := &collectionPipeline{coll: backfillCollConfig(), writer: w, dlq: dlq}
+	if err := p.backfillPage(context.Background(), page, backfillOpTime); err != nil {
 		t.Fatalf("backfillPage: %v", err)
 	}
 
@@ -367,7 +371,8 @@ func TestBackfillPage_StaticNamespaceIsOneCall(t *testing.T) {
 		wantIDs = append(wantIDs, id)
 	}
 
-	if err := backfillPage(context.Background(), w, dlq, nil, staticCollConfig(), scannedPage(t, page...), backfillOpTime); err != nil {
+	p := &collectionPipeline{coll: staticCollConfig(), writer: w, dlq: dlq}
+	if err := p.backfillPage(context.Background(), scannedPage(t, page...), backfillOpTime); err != nil {
 		t.Fatalf("backfillPage: %v", err)
 	}
 

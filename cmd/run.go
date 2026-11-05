@@ -66,14 +66,21 @@ func runCDC() error {
 	// Spawn a goroutine per collection.
 	var wg sync.WaitGroup
 	for _, coll := range cfg.Collections {
+		p := &collectionPipeline{
+			coll:   coll,
+			schema: turbopuffer.BuildSchema(coll.Mapping.Fields),
+			writer: w,
+			dlq:    dlqWriter,
+			store:  store,
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			var err error
 			if cfg.Global.SpoolEnabled {
-				err = runCollectionCDCSpooled(ctx, cfg, store, w, dlqWriter, coll, status)
+				err = p.runCDCSpooled(ctx, cfg.Global)
 			} else {
-				err = runCollectionCDCDirect(ctx, cfg, store, w, dlqWriter, coll, status)
+				err = p.runCDCDirect(ctx, cfg.Global, status)
 			}
 			if err != nil {
 				slog.Error("collection CDC stopped", "collection", coll.Name, "error", err)
@@ -180,29 +187,28 @@ func transformErrorKind(err error) mongo.ErrorKind {
 	}
 }
 
-// runCollectionCDCDirect is the default path: change stream → batcher → turbopuffer.
-func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (direct)", "collection", coll.Name, "namespace", coll.Mapping.Namespace.String())
+// runCDCDirect is the default path: change stream → batcher → turbopuffer.
+func (p *collectionPipeline) runCDCDirect(ctx context.Context, global config.GlobalConfig, status *health.Status) error {
+	slog.Info("starting CDC (direct)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
 
-	state, err := store.LoadCollectionState(ctx, coll.Name)
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, coll.Mapping.Namespace.IsDynamic())
+	stream, err := p.store.OpenChangeStream(ctx, p.coll.Name, state.ChangeStreamResumeToken, p.coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
 	defer stream.Close(ctx)
 
-	namespace := coll.Mapping.Namespace.String()
-	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
+	namespace := p.coll.Mapping.Namespace.String()
 
-	batcher := batch.New(ctx, cfg.Global, func(
+	batcher := batch.New(ctx, global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, coll.Name, schema, actions); err != nil {
+		if err := p.writer.WriteBatch(ctx, p.coll.Name, p.schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
 		slog.Info("flush",
@@ -211,48 +217,47 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 			"flushDuration", time.Since(flushStart),
 		)
 
-		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
-			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
+		if err := p.store.SaveResumeToken(ctx, p.coll.Name, resumeToken); err != nil {
+			slog.Error("failed to save resume token", "collection", p.coll.Name, "error", err)
 		}
 
-		status.SetCollectionFlushTime(coll.Name, time.Now())
+		status.SetCollectionFlushTime(p.coll.Name, time.Now())
 		return nil
 	})
 
-	return consumeStream(ctx, stream, batcher, coll, dlqWriter)
+	return consumeStream(ctx, stream, batcher, p.coll, p.dlq)
 }
 
-// runCollectionCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
-func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (spooled)", "collection", coll.Name, "namespace", coll.Mapping.Namespace.String())
+// runCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
+func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.GlobalConfig) error {
+	slog.Info("starting CDC (spooled)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
 
-	state, err := store.LoadCollectionState(ctx, coll.Name)
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, coll.Mapping.Namespace.IsDynamic())
+	stream, err := p.store.OpenChangeStream(ctx, p.coll.Name, state.ChangeStreamResumeToken, p.coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
 	defer stream.Close(ctx)
 
-	spoolDir := cfg.Global.SpoolDir
+	spoolDir := global.SpoolDir
 	if spoolDir == "" {
 		spoolDir = config.DefaultSpoolDir
 	}
-	spoolDir = filepath.Join(spoolDir, coll.Name)
+	spoolDir = filepath.Join(spoolDir, p.coll.Name)
 	sp, err := spool.Open(spoolDir)
 	if err != nil {
 		return fmt.Errorf("opening spool: %w", err)
 	}
 	defer sp.Close()
 
-	namespace := coll.Mapping.Namespace.String()
-	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
+	namespace := p.coll.Mapping.Namespace.String()
 	signal := make(chan struct{}, 1)
 
-	batcher := batch.New(ctx, cfg.Global, func(
+	batcher := batch.New(ctx, global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		data, err := json.Marshal(actions)
@@ -265,8 +270,8 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 			return fmt.Errorf("spool write: %w", err)
 		}
 
-		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
-			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
+		if err := p.store.SaveResumeToken(ctx, p.coll.Name, resumeToken); err != nil {
+			slog.Error("failed to save resume token", "collection", p.coll.Name, "error", err)
 		}
 
 		slog.Info("spool flush",
@@ -286,10 +291,10 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 	// cancels the other, and Wait returns its error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return w.RunSpoolDelivery(gctx, sp, coll.Name, schema, sp.First(), signal)
+		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, sp.First(), signal)
 	})
 	g.Go(func() error {
-		return consumeStream(gctx, stream, batcher, coll, dlqWriter)
+		return consumeStream(gctx, stream, batcher, p.coll, p.dlq)
 	})
 	return g.Wait()
 }
