@@ -67,8 +67,8 @@ type CollectionState struct {
 type ChangeEvent struct {
 	Operation                Operation
 	DocumentID               any            // raw BSON _id value
-	FullDocument             map[string]any // present for insert/replace, may be present for update
-	FullDocumentBeforeChange map[string]any // present for delete (and update) when pre-images are enabled
+	FullDocument             map[string]any // present for insert/replace; for update, the post-image when requested and available
+	FullDocumentBeforeChange map[string]any // for update and delete, the pre-image when requested and available
 	UpdatedFields            map[string]any // present for update operations
 	RemovedFields            []string       // present for update operations
 	ClusterTime              uint64         // serialized BSON Timestamp: (T<<32)|I

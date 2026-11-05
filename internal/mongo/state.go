@@ -86,8 +86,8 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 	return cs, nil
 }
 
-func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, preImages bool) (*LiveChangeStream, error) {
-	return OpenChangeStream(ctx, s.db, collection, resumeToken, preImages)
+func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
+	return OpenChangeStream(ctx, s.db, collection, resumeToken, prePostImages)
 }
 
 // ListCollectionSpecifications returns the listCollections entries for the

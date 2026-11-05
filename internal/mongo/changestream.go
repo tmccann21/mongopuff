@@ -32,10 +32,14 @@ type LiveChangeStream struct {
 
 // OpenChangeStream opens a change stream on the given collection.
 // If resumeToken is non-nil, the stream resumes from that token.
-// If preImages is true, update and delete events carry fullDocumentBeforeChange
-// when the collection has changeStreamPreAndPostImages enabled.
-func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte, preImages bool) (*LiveChangeStream, error) {
-	opts := changeStreamOptions(resumeToken, preImages)
+// Insert and replace events always carry fullDocument. If prePostImages is
+// true, update events also carry fullDocument, the post-image, and update and
+// delete events carry fullDocumentBeforeChange, the pre-image. Both are the
+// document as of the event, and are present only when the collection has
+// changeStreamPreAndPostImages enabled and the image has not expired. If
+// prePostImages is false, update and delete events carry neither image.
+func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
+	opts := changeStreamOptions(resumeToken, prePostImages)
 
 	cs, err := db.Collection(collection).Watch(ctx, mongo.Pipeline{}, opts)
 	if err != nil {
@@ -45,12 +49,16 @@ func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string
 	return &LiveChangeStream{cs: cs}, nil
 }
 
-func changeStreamOptions(resumeToken []byte, preImages bool) *options.ChangeStreamOptionsBuilder {
-	opts := options.ChangeStream().
-		SetFullDocument(options.UpdateLookup)
+// changeStreamOptions never requests updateLookup, which reads the document
+// when the event is delivered rather than as of the event. Its fullDocument
+// can be several writes newer than the pre-image, or null if the document has
+// since been deleted.
+func changeStreamOptions(resumeToken []byte, prePostImages bool) *options.ChangeStreamOptionsBuilder {
+	opts := options.ChangeStream()
 
-	if preImages {
-		opts.SetFullDocumentBeforeChange(options.WhenAvailable)
+	if prePostImages {
+		opts.SetFullDocument(options.WhenAvailable).
+			SetFullDocumentBeforeChange(options.WhenAvailable)
 	}
 
 	if resumeToken != nil {

@@ -163,8 +163,9 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 	// Every action from a static collection targets its one namespace, so a
 	// flush is one turbopuffer call however many documents it carries. An
 	// operation that resolved any other Namespace would split the flush into
-	// a second call. Events are shaped as a static stream delivers them:
-	// without fullDocumentBeforeChange, which a static stream never requests.
+	// a second call. Events are shaped as a static stream delivers them: an
+	// update without fullDocument and a delete without fullDocumentBeforeChange,
+	// since a static stream requests neither image.
 	const perOp = 25
 	var events []streamEvent
 	var wantIDs []string
@@ -179,11 +180,6 @@ func TestConsumeStream_StaticNamespaceFlushIsOneCall(t *testing.T) {
 			DocumentID:    upd,
 			UpdatedFields: map[string]any{"name": upd},
 			ClusterTime:   1,
-		}
-		// updateLookup returns null in place of the document when it was
-		// deleted before the lookup ran, so cover both shapes.
-		if i%2 == 0 {
-			update.FullDocument = scannedPage(t, staticDoc(upd))[0]
 		}
 
 		events = append(events,

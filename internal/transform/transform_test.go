@@ -370,6 +370,35 @@ func TestMapChangeEvent_DynamicNamespace_MissingFieldReturnsError(t *testing.T) 
 	}
 }
 
+// A dynamic stream requests the post-image with whenAvailable, so an update
+// arrives without fullDocument when the image has expired or was never
+// recorded. Its namespace cannot be resolved, and the caller routes it to the
+// DLQ rather than guessing from the pre-image.
+func TestMapChangeEvent_DynamicNamespace_UpdateWithoutPostImageReturnsError(t *testing.T) {
+	tests := []struct {
+		name     string
+		preImage map[string]any
+	}{
+		{name: "pre_image_present", preImage: map[string]any{"tenant": "acme", "name": "alice"}},
+		{name: "pre_image_absent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actions, err := MapChangeEvent(mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               mustObjectID("507f1f77bcf86cd799439011"),
+				FullDocumentBeforeChange: tt.preImage,
+				UpdatedFields:            map[string]any{"name": "carol"},
+				ClusterTime:              SerializeClusterTime(10, 7),
+			}, testDynColl(dynTestFields))
+			if err == nil {
+				t.Fatalf("expected error for update without a post-image, got actions %+v", actions)
+			}
+		})
+	}
+}
+
 // Backfill actions are partitioned by Namespace like CDC actions, so an action
 // left without one would be written to an empty namespace.
 func TestMapDocument_ResolvesNamespace(t *testing.T) {

@@ -31,7 +31,6 @@ func fullDocumentValue(fd *options.FullDocument) string {
 }
 
 func TestChangeStreamOptions(t *testing.T) {
-	updateLookup := options.UpdateLookup
 	whenAvailable := options.WhenAvailable
 
 	token, err := bson.Marshal(bson.D{{Key: "_data", Value: "8267A1B2C3000000012B0429296E1404"}})
@@ -39,32 +38,29 @@ func TestChangeStreamOptions(t *testing.T) {
 		t.Fatalf("bson.Marshal: %v", err)
 	}
 
-	// run.go passes preImages = transform.IsDynamic(namespace). The whole struct
-	// is compared, so a static stream that gains any option fails, not only one
-	// that gains fullDocumentBeforeChange.
+	// run.go passes prePostImages = coll.Mapping.Namespace.IsDynamic(). The
+	// whole struct is compared, so a static stream that gains any option fails,
+	// not only one that gains fullDocument or fullDocumentBeforeChange.
 	tests := []struct {
-		name        string
-		resumeToken []byte
-		preImages   bool
-		want        options.ChangeStreamOptions
+		name          string
+		resumeToken   []byte
+		prePostImages bool
+		want          options.ChangeStreamOptions
 	}{
 		{
 			name: "static_namespace",
-			want: options.ChangeStreamOptions{FullDocument: &updateLookup},
+			want: options.ChangeStreamOptions{},
 		},
 		{
 			name:        "static_namespace_resumed",
 			resumeToken: token,
-			want: options.ChangeStreamOptions{
-				FullDocument: &updateLookup,
-				ResumeAfter:  bson.Raw(token),
-			},
+			want:        options.ChangeStreamOptions{ResumeAfter: bson.Raw(token)},
 		},
 		{
-			name:      "dynamic_namespace",
-			preImages: true,
+			name:          "dynamic_namespace",
+			prePostImages: true,
 			want: options.ChangeStreamOptions{
-				FullDocument:             &updateLookup,
+				FullDocument:             &whenAvailable,
 				FullDocumentBeforeChange: &whenAvailable,
 			},
 		},
@@ -72,7 +68,7 @@ func TestChangeStreamOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveChangeStreamOptions(t, changeStreamOptions(tt.resumeToken, tt.preImages))
+			got := resolveChangeStreamOptions(t, changeStreamOptions(tt.resumeToken, tt.prePostImages))
 			if g, w := fullDocumentValue(got.FullDocument), fullDocumentValue(tt.want.FullDocument); g != w {
 				t.Errorf("fullDocument = %s, want %s", g, w)
 			}
