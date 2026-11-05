@@ -190,7 +190,7 @@ func testDynColl(fields []config.FieldMapping) config.CollectionConfig {
 	return config.CollectionConfig{
 		Name: "events",
 		Mapping: config.MappingConfig{
-			Namespace: "events_{{tenant}}",
+			Namespace: config.MustParseNamespace("events_{{tenant}}"),
 			Fields:    fields,
 		},
 	}
@@ -384,7 +384,7 @@ func TestMapDocument_ResolvesNamespace(t *testing.T) {
 			name: "static",
 			coll: config.CollectionConfig{
 				Name:    "events",
-				Mapping: config.MappingConfig{Namespace: "events", Fields: dynTestFields},
+				Mapping: config.MappingConfig{Namespace: config.MustParseNamespace("events"), Fields: dynTestFields},
 			},
 			want: "events",
 		},

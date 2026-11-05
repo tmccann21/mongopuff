@@ -106,7 +106,7 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 		return Action{}, err
 	}
 
-	ns, err := ResolveNamespace(coll.Mapping.Namespace, doc)
+	ns, err := resolveNamespace(coll.Mapping.Namespace, doc)
 	if err != nil {
 		return Action{}, err
 	}
@@ -132,7 +132,7 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 		return Action{}, err
 	}
 
-	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
 	if err != nil {
 		return Action{}, err
 	}
@@ -157,12 +157,12 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 // transition is detected and two actions are returned: a delete from the old namespace
 // followed by an upsert into the new namespace. Otherwise the event is a normal patch.
 func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
-	if IsDynamic(coll.Mapping.Namespace) && event.FullDocumentBeforeChange != nil {
-		oldNS, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
+	if coll.Mapping.Namespace.IsDynamic() && event.FullDocumentBeforeChange != nil {
+		oldNS, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
 		if err != nil {
 			return nil, err
 		}
-		newNS, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+		newNS, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +228,7 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, 
 		return nil, nil
 	}
 
-	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action,
 		return nil, err
 	}
 
-	ns, err := ResolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
+	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
 	if err != nil {
 		return nil, err
 	}

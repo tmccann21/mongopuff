@@ -55,7 +55,7 @@ type FieldMapping struct {
 }
 
 type MappingConfig struct {
-	Namespace string         `yaml:"namespace"`
+	Namespace Namespace      `yaml:"namespace"`
 	Fields    []FieldMapping `yaml:"fields"`
 }
 

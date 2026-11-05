@@ -8,7 +8,6 @@ import (
 
 	"github.com/tmccann21/mongopuff/internal/config"
 	"github.com/tmccann21/mongopuff/internal/mongo"
-	"github.com/tmccann21/mongopuff/internal/transform"
 
 	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -16,7 +15,7 @@ import (
 func checkPreImages(ctx context.Context, store *mongo.Store, collections []config.CollectionConfig) error {
 	var names []string
 	for _, c := range collections {
-		if transform.IsDynamic(c.Mapping.Namespace) {
+		if c.Mapping.Namespace.IsDynamic() {
 			names = append(names, c.Name)
 		}
 	}
@@ -44,7 +43,7 @@ func verifyPreImages(collections []config.CollectionConfig, specs []mongodriver.
 
 	var errs []error
 	for _, c := range collections {
-		if !transform.IsDynamic(c.Mapping.Namespace) {
+		if !c.Mapping.Namespace.IsDynamic() {
 			continue
 		}
 

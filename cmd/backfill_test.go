@@ -185,6 +185,13 @@ func TestBackfillPage_FailedDocumentGoesToDLQ(t *testing.T) {
 			wantKind: mongo.ErrTypeMismatch,
 		},
 		{
+			// Resolves to "items_acme corp", which turbopuffer rejects.
+			name:     "namespace_value_invalid_name",
+			doc:      tenantDoc("bad", "acme corp"),
+			wantID:   "bad",
+			wantKind: mongo.ErrTypeMismatch,
+		},
+		{
 			name:     "mapped_field_type_mismatch",
 			doc:      bson.D{{Key: "_id", Value: "bad"}, {Key: "tenant", Value: "a"}, {Key: "name", Value: int32(7)}},
 			wantID:   "bad",

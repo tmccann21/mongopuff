@@ -11,7 +11,7 @@ func TestValidate_Minimal(t *testing.T) {
 			{
 				Name: "orders",
 				Mapping: MappingConfig{
-					Namespace: "orders",
+					Namespace: MustParseNamespace("orders"),
 					Fields:    []FieldMapping{{Name: "total", Type: FieldTypeString}},
 				},
 			},
@@ -29,7 +29,7 @@ func TestValidate_CustomNamespace(t *testing.T) {
 			{
 				Name: "orders",
 				Mapping: MappingConfig{
-					Namespace: "order_data",
+					Namespace: MustParseNamespace("order_data"),
 					Fields:    []FieldMapping{{Name: "total", Type: FieldTypeString}},
 				},
 			},
@@ -40,8 +40,8 @@ func TestValidate_CustomNamespace(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.Collections[0].Mapping.Namespace != "order_data" {
-		t.Errorf("got namespace %q, want %q", cfg.Collections[0].Mapping.Namespace, "order_data")
+	if got := cfg.Collections[0].Mapping.Namespace.String(); got != "order_data" {
+		t.Errorf("got namespace %q, want %q", got, "order_data")
 	}
 }
 
@@ -51,7 +51,7 @@ func TestValidate_AllFieldTypes(t *testing.T) {
 			{
 				Name: "everything",
 				Mapping: MappingConfig{
-					Namespace: "everything",
+					Namespace: MustParseNamespace("everything"),
 					Fields: []FieldMapping{
 						{Name: "f_string", Type: FieldTypeString},
 						{Name: "f_int", Type: FieldTypeInt},
@@ -85,14 +85,14 @@ func TestValidate_DuplicateNamespace(t *testing.T) {
 			{
 				Name: "users_v1",
 				Mapping: MappingConfig{
-					Namespace: "users",
+					Namespace: MustParseNamespace("users"),
 					Fields:    []FieldMapping{{Name: "name", Type: FieldTypeString}},
 				},
 			},
 			{
 				Name: "users_v2",
 				Mapping: MappingConfig{
-					Namespace: "users",
+					Namespace: MustParseNamespace("users"),
 					Fields:    []FieldMapping{{Name: "name", Type: FieldTypeString}},
 				},
 			},
@@ -135,7 +135,7 @@ func TestValidate_UnknownFieldType(t *testing.T) {
 			{
 				Name: "products",
 				Mapping: MappingConfig{
-					Namespace: "products",
+					Namespace: MustParseNamespace("products"),
 					Fields:    []FieldMapping{{Name: "meta", Type: "map"}},
 				},
 			},
@@ -160,7 +160,7 @@ func TestValidate_VectorMissingDimension(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Precision: VectorPrecisionF32},
 					},
@@ -184,7 +184,7 @@ func TestValidate_VectorMissingPrecision(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Dimension: 128},
 					},
@@ -208,7 +208,7 @@ func TestValidate_VectorBadPrecision(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Dimension: 128, Precision: "f64"},
 					},

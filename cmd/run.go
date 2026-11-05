@@ -169,20 +169,20 @@ func transformFailureEntry(collection string, id any, op mongo.Operation, cluste
 
 // runCollectionCDCDirect is the default path: change stream → batcher → turbopuffer.
 func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (direct)", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
+	slog.Info("starting CDC (direct)", "collection", coll.Name, "namespace", coll.Mapping.Namespace.String())
 
 	state, err := store.LoadCollectionState(ctx, coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, transform.IsDynamic(coll.Mapping.Namespace))
+	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
 	defer stream.Close(ctx)
 
-	namespace := coll.Mapping.Namespace
+	namespace := coll.Mapping.Namespace.String()
 	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
 
 	batcher := batch.New(ctx, cfg.Global, func(
@@ -211,14 +211,14 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 
 // runCollectionCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
 func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (spooled)", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
+	slog.Info("starting CDC (spooled)", "collection", coll.Name, "namespace", coll.Mapping.Namespace.String())
 
 	state, err := store.LoadCollectionState(ctx, coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, transform.IsDynamic(coll.Mapping.Namespace))
+	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken, coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 	}
 	defer sp.Close()
 
-	namespace := coll.Mapping.Namespace
+	namespace := coll.Mapping.Namespace.String()
 	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
 	signal := make(chan struct{}, 1)
 

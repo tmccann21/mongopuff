@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -109,6 +110,52 @@ func TestConsumeStream_DLQWriteFailureStopsStream(t *testing.T) {
 	}
 	if tokens := rec.getTokens(); len(tokens) != 0 {
 		t.Errorf("flushed resume tokens %q past an event that was neither written nor DLQ'd", tokens)
+	}
+}
+
+func TestConsumeStream_InvalidNamespaceGoesToDLQ(t *testing.T) {
+	// A document whose namespace resolves to a name turbopuffer rejects is a
+	// transform failure: it goes to the DLQ with no turbopuffer write, and the
+	// events around it are still written.
+	tp := &fakeTpuf{}
+	dlq := &recordingDLQ{}
+	w := writer.New(tp, dlq)
+	coll := backfillCollConfig()
+
+	ctx := context.Background()
+	b := batch.New(ctx, config.GlobalConfig{BatchFlushCount: 10, BatchFlushTimeMs: 60000}, func(
+		ctx context.Context, actions []transform.Action, _ []byte,
+	) error {
+		return w.WriteBatch(ctx, coll.Name, nil, actions)
+	})
+	defer b.Close(ctx)
+
+	stream := &fakeStream{events: []streamEvent{
+		{event: insertEvent(t, tenantDoc("a-1", "a")), token: "tok-a-1"},
+		// Resolves to "items_acme corp".
+		{event: insertEvent(t, tenantDoc("bad", "acme corp")), token: "tok-bad"},
+		{event: insertEvent(t, tenantDoc("b-1", "b")), token: "tok-b-1"},
+	}}
+
+	if err := consumeStream(ctx, stream, b, coll, dlq); err != nil {
+		t.Fatalf("consumeStream: %v", err)
+	}
+
+	got := writtenDocIDs(t, tp.getCalls())
+	want := map[string][]string{
+		"items_a": {"a-1"},
+		"items_b": {"b-1"},
+	}
+	if !maps.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("written doc IDs = %v, want %v", got, want)
+	}
+
+	entries := dlq.getEntries()
+	if len(entries) != 1 {
+		t.Fatalf("got %d DLQ entries, want 1: %+v", len(entries), entries)
+	}
+	if e := entries[0]; e.DocumentID != "bad" || e.Collection != "items" {
+		t.Errorf("DLQ entry DocumentID, Collection = %q, %q; want %q, %q", e.DocumentID, e.Collection, "bad", "items")
 	}
 }
 

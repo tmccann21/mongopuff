@@ -31,7 +31,7 @@ func mustCollSpec(name string, opts bson.D) mongodriver.CollectionSpecification 
 }
 
 func collConfig(name, namespace string) config.CollectionConfig {
-	return config.CollectionConfig{Name: name, Mapping: config.MappingConfig{Namespace: namespace}}
+	return config.CollectionConfig{Name: name, Mapping: config.MappingConfig{Namespace: config.MustParseNamespace(namespace)}}
 }
 
 func TestVerifyPreImages(t *testing.T) {

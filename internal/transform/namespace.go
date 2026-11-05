@@ -1,38 +1,49 @@
 package transform
 
 import (
+	"errors"
 	"fmt"
-	"regexp"
-	"strings"
+	"strconv"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/tmccann21/mongopuff/internal/config"
 )
 
-var tokenRe = regexp.MustCompile(`\{\{([^}]+)\}\}`)
-
-func IsDynamic(namespace string) bool {
-	return strings.Contains(namespace, "{{")
-}
-
-func ResolveNamespace(template string, doc map[string]any) (string, error) {
-	matches := tokenRe.FindAllStringSubmatchIndex(template, -1)
-	if len(matches) == 0 {
-		return template, nil
-	}
-
-	var sb strings.Builder
-	pos := 0
-	for _, m := range matches {
-		sb.WriteString(template[pos:m[0]])
-		field := template[m[2]:m[3]]
-		if strings.Contains(field, ".") {
-			return "", fmt.Errorf("namespace template: nested field path %q is not supported", field)
-		}
+// resolveNamespace resolves ns against doc. A {{field}} that is absent from
+// doc or null fails, as does a value formatNamespaceValue rejects.
+func resolveNamespace(ns config.Namespace, doc map[string]any) (string, error) {
+	return ns.Resolve(func(field string) (string, error) {
 		val, ok := doc[field]
 		if !ok || val == nil {
-			return "", fmt.Errorf("namespace field %q is absent or null", field)
+			return "", errors.New("absent or null")
 		}
-		sb.WriteString(fmt.Sprint(val))
-		pos = m[1]
+		return formatNamespaceValue(val)
+	})
+}
+
+// formatNamespaceValue formats a {{field}} value as namespace text. It accepts
+// only types with one obvious printed form: a string as-is, an integer or
+// whole-number double in decimal, an ObjectID as hex, and a UUID hyphenated.
+func formatNamespaceValue(val any) (string, error) {
+	switch v := val.(type) {
+	case string:
+		return v, nil
+	case int32, int64, float64:
+		n, err := coerceInt(v)
+		if err != nil {
+			return "", err
+		}
+		return strconv.FormatInt(n.(int64), 10), nil
+	case bson.ObjectID:
+		return v.Hex(), nil
+	case bson.Binary:
+		s, err := coerceUUID(v)
+		if err != nil {
+			return "", err
+		}
+		return s.(string), nil
+	default:
+		return "", fmt.Errorf("unsupported type %T", val)
 	}
-	sb.WriteString(template[pos:])
-	return sb.String(), nil
 }

@@ -68,7 +68,7 @@ type fieldPrompt struct {
 
 type collectionPrompt struct {
 	name          string
-	namespace     string
+	namespace     config.Namespace
 	mirrorDeletes bool
 	fields        []fieldPrompt
 }
@@ -146,7 +146,15 @@ func promptCollection() (collectionPrompt, error) {
 		return collectionPrompt{}, fmt.Errorf("collection name is required")
 	}
 
-	namespace := promptDefault("Turbopuffer namespace", name)
+	var namespace config.Namespace
+	for {
+		ns, err := config.ParseNamespace(promptDefault("Turbopuffer namespace", name))
+		if err == nil {
+			namespace = ns
+			break
+		}
+		fmt.Printf("Invalid %v\n", err)
+	}
 	mirrorDeletes := promptYesNo("Mirror deletes?", true)
 
 	fmt.Println("Add fields:")
