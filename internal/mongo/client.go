@@ -78,5 +78,5 @@ type ChangeEvent struct {
 }
 
 type DLQWriter interface {
-	Write(ctx context.Context, entry DLQEntry) error
+	Write(ctx context.Context, entries ...DLQEntry) error
 }

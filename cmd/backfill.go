@@ -104,18 +104,20 @@ func runBackfill() error {
 // unavailable DLQ fails the page without spending writes on it.
 func backfillPage(ctx context.Context, w *writer.Writer, dlq mongo.DLQWriter, schema map[string]tpuf.AttributeSchemaConfigParam, coll config.CollectionConfig, docs []map[string]any, opTime uint64) error {
 	actions := make([]transform.Action, 0, len(docs))
+	var failed []mongo.DLQEntry
 	for _, doc := range docs {
 		action, err := transform.MapDocument(doc, opTime, coll)
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "documentId", doc["_id"], "error", err)
 			// action is zero on error; OpInsert matches what MapDocument stamps on success.
-			entry := transformFailureEntry(coll.Name, doc["_id"], mongo.OpInsert, opTime, err)
-			if err := dlq.Write(ctx, entry); err != nil {
-				return fmt.Errorf("DLQ write for document %v: %w", doc["_id"], err)
-			}
+			failed = append(failed, transformFailureEntry(coll.Name, doc["_id"], mongo.OpInsert, opTime, err))
 			continue
 		}
 		actions = append(actions, action)
+	}
+
+	if err := dlq.Write(ctx, failed...); err != nil {
+		return fmt.Errorf("DLQ write for %d documents: %w", len(failed), err)
 	}
 
 	if err := w.WriteBatch(ctx, coll.Name, schema, actions); err != nil {

@@ -157,8 +157,10 @@ func (w *Writer) sendToDLQ(ctx context.Context, collection, namespace string, ac
 		"error", writeErr,
 	)
 
+	now := time.Now()
+	entries := make([]mongo.DLQEntry, 0, len(actions))
 	for _, a := range actions {
-		entry := mongo.DLQEntry{
+		entries = append(entries, mongo.DLQEntry{
 			Collection:   collection,
 			DocumentID:   a.DocumentID,
 			Operation:    a.Operation,
@@ -167,13 +169,12 @@ func (w *Writer) sendToDLQ(ctx context.Context, collection, namespace string, ac
 			ErrorKind:    errKind,
 			ErrorMessage: writeErr.Error(),
 			ClusterTime:  a.ClusterTime,
-			CreatedAt:    time.Now(),
-		}
-		if err := w.dlq.Write(ctx, entry); err != nil {
-			return fmt.Errorf("DLQ write failed for document %s: %w", a.DocumentID, err)
-		}
+			CreatedAt:    now,
+		})
 	}
-
+	if err := w.dlq.Write(ctx, entries...); err != nil {
+		return fmt.Errorf("DLQ write failed for %d actions: %w", len(entries), err)
+	}
 	return nil
 }
 

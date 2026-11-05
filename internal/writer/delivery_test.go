@@ -72,27 +72,35 @@ func (m *mockTpuf) getCalls() []writeBatchCall {
 
 type noopDLQ struct{}
 
-func (noopDLQ) Write(_ context.Context, _ mongo.DLQEntry) error { return nil }
+func (noopDLQ) Write(context.Context, ...mongo.DLQEntry) error { return nil }
 
+// recordingDLQ records the entries of each Write call. WriteBatch DLQs failed
+// partitions concurrently, so calls are guarded by mu.
 type recordingDLQ struct {
-	mu      sync.Mutex
-	entries []mongo.DLQEntry
-	err     error // returned from every Write, after the entry is recorded
+	mu    sync.Mutex
+	calls [][]mongo.DLQEntry
+	err   error // returned from every Write, after the call is recorded
 }
 
-func (d *recordingDLQ) Write(_ context.Context, entry mongo.DLQEntry) error {
+func (d *recordingDLQ) Write(_ context.Context, entries ...mongo.DLQEntry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.entries = append(d.entries, entry)
+	d.calls = append(d.calls, slices.Clone(entries))
 	return d.err
 }
 
+// getCalls returns the entries of each Write call, in call order.
+func (d *recordingDLQ) getCalls() [][]mongo.DLQEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.calls)
+}
+
+// getEntries returns the entries of every Write call, in call order.
 func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	dst := make([]mongo.DLQEntry, len(d.entries))
-	copy(dst, d.entries)
-	return dst
+	return slices.Concat(d.calls...)
 }
 
 // --- helpers ---
@@ -312,7 +320,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 // ctxDLQ fails every Write once ctx is done, as the MongoDB driver does.
 type ctxDLQ struct{}
 
-func (ctxDLQ) Write(ctx context.Context, _ mongo.DLQEntry) error { return ctx.Err() }
+func (ctxDLQ) Write(ctx context.Context, _ ...mongo.DLQEntry) error { return ctx.Err() }
 
 // assertSegmentsOnDisk fails unless every segment in want is still in the spool.
 func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {

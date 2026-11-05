@@ -45,23 +45,33 @@ func (f *fakeTpuf) getCalls() []tpufCall {
 	return slices.Clone(f.calls)
 }
 
+// recordingDLQ records the entries of each Write call. WriteBatch DLQs failed
+// partitions concurrently, so calls are guarded by mu.
 type recordingDLQ struct {
-	mu      sync.Mutex
-	entries []mongo.DLQEntry
-	err     error // returned from every Write, after the entry is recorded
+	mu    sync.Mutex
+	calls [][]mongo.DLQEntry
+	err   error // returned from every Write, after the call is recorded
 }
 
-func (d *recordingDLQ) Write(_ context.Context, entry mongo.DLQEntry) error {
+func (d *recordingDLQ) Write(_ context.Context, entries ...mongo.DLQEntry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.entries = append(d.entries, entry)
+	d.calls = append(d.calls, slices.Clone(entries))
 	return d.err
 }
 
+// getCalls returns the entries of each Write call, in call order.
+func (d *recordingDLQ) getCalls() [][]mongo.DLQEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.calls)
+}
+
+// getEntries returns the entries of every Write call, in call order.
 func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return slices.Clone(d.entries)
+	return slices.Concat(d.calls...)
 }
 
 // scannedPage round-trips docs through BSON so their values have the Go types
@@ -285,7 +295,8 @@ func TestBackfillPage_DLQWriteFailureFailsPage(t *testing.T) {
 	// caller does not save a cursor past it.
 	dlqErr := errors.New("dlq unavailable")
 	dlq := &recordingDLQ{err: dlqErr}
-	w := writer.New(&fakeTpuf{}, dlq)
+	tp := &fakeTpuf{}
+	w := writer.New(tp, dlq)
 
 	page := scannedPage(t,
 		tenantDoc("a-1", "a"),
@@ -295,6 +306,41 @@ func TestBackfillPage_DLQWriteFailureFailsPage(t *testing.T) {
 	err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime)
 	if !errors.Is(err, dlqErr) {
 		t.Fatalf("backfillPage error = %v, want it to wrap %v", err, dlqErr)
+	}
+
+	// The DLQ write comes first, so a page that fails on it spends no
+	// turbopuffer writes.
+	if calls := tp.getCalls(); len(calls) != 0 {
+		t.Errorf("got %d turbopuffer calls, want 0: %+v", len(calls), calls)
+	}
+}
+
+func TestBackfillPage_FailedDocumentsAreOneDLQCall(t *testing.T) {
+	// A page's failed documents are DLQ'd in one round trip, not one per
+	// document.
+	dlq := &recordingDLQ{}
+	w := writer.New(&fakeTpuf{}, dlq)
+
+	page := scannedPage(t,
+		bson.D{{Key: "_id", Value: "bad-1"}, {Key: "name", Value: "bad-1"}},
+		tenantDoc("a-1", "a"),
+		bson.D{{Key: "_id", Value: "bad-2"}, {Key: "name", Value: "bad-2"}},
+	)
+
+	if err := backfillPage(context.Background(), w, dlq, nil, backfillCollConfig(), page, backfillOpTime); err != nil {
+		t.Fatalf("backfillPage: %v", err)
+	}
+
+	calls := dlq.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d DLQ calls, want 1: %+v", len(calls), calls)
+	}
+	got := make([]string, 0, len(calls[0]))
+	for _, e := range calls[0] {
+		got = append(got, e.DocumentID)
+	}
+	if want := []string{"bad-1", "bad-2"}; !slices.Equal(got, want) {
+		t.Errorf("DLQ doc IDs = %v, want %v", got, want)
 	}
 }
 

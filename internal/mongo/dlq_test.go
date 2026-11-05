@@ -1,11 +1,30 @@
 package mongo
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
+
+func TestDLQWriter_WriteNoEntries(t *testing.T) {
+	// The driver rejects an empty InsertMany before contacting the server, so
+	// a client with no server behind it is enough to catch a Write that
+	// forwards zero entries.
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:1"))
+	if err != nil {
+		t.Fatalf("mongo.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+
+	d := &dlqWriter{coll: client.Database("test").Collection(mongopuffDLQCollection)}
+	if err := d.Write(context.Background()); err != nil {
+		t.Errorf("Write with no entries: %v, want nil", err)
+	}
+}
 
 func TestDLQStoredEntry_DecodesEntryWithoutNamespaceOrActionType(t *testing.T) {
 	// An entry as stored before namespace and actionType existed, which is

@@ -201,6 +201,61 @@ func TestWriteBatch_FailedPartitionGoesToDLQ(t *testing.T) {
 	}
 }
 
+func TestWriteBatch_FailedPartitionIsOneDLQCall(t *testing.T) {
+	// A failed partition is DLQ'd in one round trip, not one per action.
+	mock := &mockTpuf{
+		hook: func(_ context.Context, namespace string) error {
+			if namespace == "tenant-c" {
+				return nil
+			}
+			return errors.New("turbopuffer rejected write")
+		},
+	}
+	dlq := &recordingDLQ{}
+	w := New(mock, dlq)
+
+	actions := []transform.Action{
+		nsUpsert("tenant-a", "a-1"),
+		nsUpsert("tenant-b", "b-1"),
+		nsUpsert("tenant-c", "c-1"),
+		nsUpsert("tenant-a", "a-2"),
+		nsUpsert("tenant-b", "b-2"),
+		nsUpsert("tenant-a", "a-3"),
+	}
+
+	if err := w.WriteBatch(context.Background(), testCollection, nil, actions); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	calls := dlq.getCalls()
+	if len(calls) != 2 {
+		t.Fatalf("got %d DLQ calls, want 2 (one per failed partition): %+v", len(calls), calls)
+	}
+
+	// Failed partitions are DLQ'd concurrently, so calls are keyed by
+	// namespace rather than compared in order.
+	got := make(map[string][]string, len(calls))
+	for _, call := range calls {
+		if len(call) == 0 {
+			t.Fatal("DLQ call carried no entries")
+		}
+		ns := call[0].Namespace
+		for _, e := range call {
+			if e.Namespace != ns {
+				t.Errorf("DLQ call for %q carried entry %s with Namespace %q", ns, e.DocumentID, e.Namespace)
+			}
+		}
+		got[ns] = dlqDocIDs(call)
+	}
+	want := map[string][]string{
+		"tenant-a": {"a-1", "a-2", "a-3"},
+		"tenant-b": {"b-1", "b-2"},
+	}
+	if !maps.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("DLQ doc IDs by call = %v, want %v", got, want)
+	}
+}
+
 func TestWriteBatch_FailedTransitionDeleteRecordsOldNamespace(t *testing.T) {
 	// The delete half of a namespace transition fails while the upsert half
 	// succeeds, leaving a stale copy in the old namespace. The DLQ entry is
