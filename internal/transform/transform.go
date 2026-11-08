@@ -22,6 +22,20 @@ const (
 	ActionDelete
 )
 
+// String TODO: document.
+func (t ActionType) String() string {
+	switch t {
+	case ActionUpsert:
+		return "upsert"
+	case ActionPatch:
+		return "patch"
+	case ActionDelete:
+		return "delete"
+	default:
+		return "ActionType(" + strconv.Itoa(int(t)) + ")"
+	}
+}
+
 // Action is what gets sent to turbopuffer after transforming a change event.
 type Action struct {
 	Type        ActionType

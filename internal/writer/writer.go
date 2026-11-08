@@ -95,7 +95,7 @@ func (w *Writer) writePartition(ctx context.Context, collection string, schema m
 }
 
 // RunSpoolDelivery writes collection's spool segments to turbopuffer in order,
-// starting at startSegment, and removes each one once it has been written or
+// starting at sp.First(), and removes each one once it has been written or
 // DLQ'd. It waits on signal for new segments and returns nil when ctx is done.
 //
 // It returns an error, leaving the segment on disk for the next run, when a
@@ -104,8 +104,8 @@ func (w *Writer) writePartition(ctx context.Context, collection string, schema m
 // events. Delivery stops rather than moving past it, which also keeps segments
 // in order: deletes are unconditional, so delivering a newer delete before an
 // older upsert would let the upsert bring a deleted document back.
-func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, collection string, schema map[string]tpuf.AttributeSchemaConfigParam, startSegment uint32, signal <-chan struct{}) error {
-	nextDeliver := startSegment
+func (w *Writer) RunSpoolDelivery(ctx context.Context, sp *spool.Spool, collection string, schema map[string]tpuf.AttributeSchemaConfigParam, signal <-chan struct{}) error {
+	nextDeliver := sp.First()
 
 	for {
 		data, err := sp.Read(nextDeliver)
@@ -181,14 +181,5 @@ func (w *Writer) sendToDLQ(ctx context.Context, collection, namespace string, ac
 // dlqActionType gives the stored form of t. An unknown type is recorded rather
 // than rejected: failing the DLQ write would stop the pipeline over a label.
 func dlqActionType(t transform.ActionType) mongo.DLQActionType {
-	switch t {
-	case transform.ActionUpsert:
-		return mongo.DLQActionUpsert
-	case transform.ActionPatch:
-		return mongo.DLQActionPatch
-	case transform.ActionDelete:
-		return mongo.DLQActionDelete
-	default:
-		return mongo.DLQActionType(fmt.Sprintf("unknown(%d)", t))
-	}
+	return mongo.DLQActionType(t.String())
 }

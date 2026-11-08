@@ -311,15 +311,15 @@ func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.Gl
 		}
 		return nil
 	})
-	// Runs after delivery has stopped and before sp.Close. The last segment
-	// stays on disk for the next run to deliver.
+	// Runs after delivery has stopped. The last segment stays on disk for the
+	// next run to deliver.
 	defer closeBatcher(ctx, batcher, global.ShutdownTimeout(), &err)
 
 	// Delivery and the change stream stop together: whichever fails first
 	// cancels the other, and Wait returns its error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, sp.First(), appended)
+		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, appended)
 	})
 	g.Go(func() error {
 		return consumeStream(gctx, stream, batcher, p.coll, p.dlq)

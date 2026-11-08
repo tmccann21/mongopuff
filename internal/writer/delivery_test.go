@@ -154,7 +154,6 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-0"))
 	writeSegment(t, sp, makeActions("doc-1"))
@@ -170,7 +169,7 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -190,14 +189,7 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 		}
 	}
 
-	// Verify segment files are removed.
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
-	}
-	if len(segs) != 0 {
-		t.Errorf("segments remaining: %v, want none", segs)
-	}
+	assertSegmentsRemoved(t, sp, 0, 1, 2)
 }
 
 func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
@@ -205,7 +197,6 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -217,7 +208,7 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -249,7 +240,6 @@ func TestRunSpoolDelivery_StopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -259,7 +249,7 @@ func TestRunSpoolDelivery_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -278,7 +268,6 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-fail"))
 	writeSegment(t, sp, makeActions("doc-ok"))
@@ -295,7 +284,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -308,13 +297,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	}
 
 	// The failed write went to the DLQ, so segment 0 is handled and removed.
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
-	}
-	if len(segs) != 0 {
-		t.Errorf("segments remaining: %v, want none", segs)
-	}
+	assertSegmentsRemoved(t, sp, 0, 1)
 }
 
 // ctxDLQ fails every Write once ctx is done, as the MongoDB driver does.
@@ -325,23 +308,30 @@ func (ctxDLQ) Write(ctx context.Context, _ ...mongo.DLQEntry) error { return ctx
 // assertSegmentsOnDisk fails unless every segment in want is still in the spool.
 func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {
 	t.Helper()
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
-	}
 	for _, seg := range want {
-		if !slices.Contains(segs, seg) {
-			t.Errorf("segment %d was removed (segments on disk: %v)", seg, segs)
+		if _, err := sp.Read(seg); err != nil {
+			t.Errorf("segment %d: %v, want it still on disk", seg, err)
 		}
 	}
 }
 
-// startDelivery runs RunSpoolDelivery from segment 0 in a goroutine and
-// returns a channel that receives its result.
+// assertSegmentsRemoved fails unless every segment in removed is gone from the
+// spool.
+func assertSegmentsRemoved(t *testing.T, sp *spool.Spool, removed ...uint32) {
+	t.Helper()
+	for _, seg := range removed {
+		if _, err := sp.Read(seg); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("Read(%d) error = %v, want it to wrap os.ErrNotExist", seg, err)
+		}
+	}
+}
+
+// startDelivery runs RunSpoolDelivery in a goroutine and returns a channel that
+// receives its result.
 func startDelivery(ctx context.Context, w *Writer, sp *spool.Spool) <-chan error {
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, make(chan struct{}, 1))
+		errCh <- w.RunSpoolDelivery(ctx, sp, testCollection, nil, make(chan struct{}, 1))
 	}()
 	return errCh
 }
@@ -370,7 +360,6 @@ func TestRunSpoolDelivery_StopsAtUndeliverableSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-fail"))
 	writeSegment(t, sp, makeActions("doc-later"))
@@ -402,7 +391,6 @@ func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-0"))
 
@@ -439,7 +427,6 @@ func TestRunSpoolDelivery_StopsAtCorruptSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	if _, err := sp.Append([]byte("not json")); err != nil {
 		t.Fatalf("spool.Append: %v", err)
@@ -471,7 +458,6 @@ func TestRunSpoolDelivery_StopsWhenRemoveFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-0"))
 
@@ -499,7 +485,6 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	writeSegment(t, sp, makeActions("doc-0"))
 	writeSegment(t, sp, makeActions("doc-1"))
@@ -517,7 +502,7 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, testCollection, nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 

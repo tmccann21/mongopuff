@@ -120,7 +120,7 @@ func TestWriteBatch_NamespaceTransitionWritesBothNamespaces(t *testing.T) {
 			continue
 		}
 		if len(call.actions) != 1 || call.actions[0].Type != want {
-			t.Errorf("namespace %q: got %+v, want a single action of type %d", call.namespace, call.actions, want)
+			t.Errorf("namespace %q: got %+v, want a single action of type %v", call.namespace, call.actions, want)
 		}
 		delete(wantType, call.namespace)
 	}

@@ -119,11 +119,6 @@ func (s *Spool) Remove(segment uint32) error {
 	return nil
 }
 
-// Segments returns the numbers of the segments on disk, in ascending order.
-func (s *Spool) Segments() ([]uint32, error) {
-	return listSegments(s.dir)
-}
-
 func (s *Spool) path(segment uint32) string {
 	return filepath.Join(s.dir, fmt.Sprintf("%06d.spool", segment))
 }

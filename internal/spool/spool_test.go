@@ -89,16 +89,15 @@ func TestOpen_IgnoresTmpFiles(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	sp, err := Open(dir)
-	if err != nil {
+	if _, err := Open(dir); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	segs, err := sp.Segments()
+	segs, err := listSegments(dir)
 	if err != nil {
-		t.Fatalf("Segments: %v", err)
+		t.Fatalf("listSegments: %v", err)
 	}
 	if want := []uint32{0}; !slices.Equal(segs, want) {
-		t.Errorf("Segments() = %v, want %v", segs, want)
+		t.Errorf("listSegments = %v, want %v", segs, want)
 	}
 }
 
@@ -149,38 +148,30 @@ func TestRead_NotExist(t *testing.T) {
 	}
 }
 
-func TestSegments_ReturnsOrderedList(t *testing.T) {
+func TestListSegments_ReturnsOrderedList(t *testing.T) {
 	// Names are zero-padded to six digits, so past 999999 they gain a digit and
 	// sorting by name would put 1000000 first.
 	dir := t.TempDir()
 	want := []uint32{999998, 999999, 1000000}
 	writeSegmentFiles(t, dir, want...)
 
-	sp, err := Open(dir)
+	segs, err := listSegments(dir)
 	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
+		t.Fatalf("listSegments: %v", err)
 	}
 	if !slices.Equal(segs, want) {
-		t.Errorf("Segments() = %v, want %v", segs, want)
+		t.Errorf("listSegments = %v, want %v", segs, want)
 	}
 }
 
-func TestSegments_EmptyDir(t *testing.T) {
-	sp, err := Open(t.TempDir())
+func TestListSegments_EmptyDir(t *testing.T) {
+	segs, err := listSegments(t.TempDir())
 	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
+		t.Fatalf("listSegments: %v", err)
 	}
 
 	if len(segs) != 0 {
-		t.Errorf("Segments() = %v, want empty slice", segs)
+		t.Errorf("listSegments = %v, want empty slice", segs)
 	}
 }
 
