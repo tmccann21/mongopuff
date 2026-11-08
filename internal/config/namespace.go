@@ -9,7 +9,8 @@ import (
 // maxNamespaceLen is the longest namespace name turbopuffer accepts.
 const maxNamespaceLen = 128
 
-// Namespace TODO: document.
+// Namespace is the turbopuffer namespace from config: either a fixed name or a
+// template whose {{field}} tokens are filled in from each document.
 type Namespace struct {
 	raw string
 	// parts is the template split into literal text and {{field}} tokens, in
@@ -23,7 +24,10 @@ type namespacePart struct {
 	isField bool
 }
 
-// ParseNamespace TODO: document.
+// ParseNamespace parses s as a fixed namespace name or a template containing
+// top-level {{field}} tokens. It rejects a template that can never resolve to
+// a valid name, so the mistake fails once at startup instead of once per event
+// in the DLQ.
 func ParseNamespace(s string) (Namespace, error) {
 	parts, err := parseNamespaceParts(s)
 	if err != nil {
@@ -32,7 +36,7 @@ func ParseNamespace(s string) (Namespace, error) {
 	return Namespace{raw: s, parts: parts}, nil
 }
 
-// MustParseNamespace TODO: document.
+// MustParseNamespace panics if ParseNamespace fails.
 func MustParseNamespace(s string) Namespace {
 	n, err := ParseNamespace(s)
 	if err != nil {
@@ -97,12 +101,15 @@ func checkTemplateField(field string) error {
 	return nil
 }
 
-// IsDynamic TODO: document.
+// IsDynamic reports whether the namespace contains a {{field}} token.
 func (n Namespace) IsDynamic() bool {
 	return n.parts != nil
 }
 
-// Resolve TODO: document.
+// Resolve returns the namespace name for one document, calling value to get
+// each {{field}}. A static namespace returns its raw string without calling
+// value. The resolved name is checked against turbopuffer's naming rules, so
+// Resolve can fail even when every value call succeeds.
 func (n Namespace) Resolve(value func(field string) (string, error)) (string, error) {
 	if !n.IsDynamic() {
 		return n.raw, nil
@@ -128,17 +135,18 @@ func (n Namespace) Resolve(value func(field string) (string, error)) (string, er
 	return name, nil
 }
 
-// String TODO: document.
+// String returns the raw namespace string.
 func (n Namespace) String() string {
 	return n.raw
 }
 
-// MarshalText TODO: document.
+// MarshalText implements encoding.TextMarshaler. It returns the raw string.
 func (n Namespace) MarshalText() ([]byte, error) {
 	return []byte(n.raw), nil
 }
 
-// UnmarshalText TODO: document.
+// UnmarshalText implements encoding.TextUnmarshaler using ParseNamespace, so
+// an invalid template fails when the config is loaded.
 func (n *Namespace) UnmarshalText(text []byte) error {
 	parsed, err := ParseNamespace(string(text))
 	if err != nil {

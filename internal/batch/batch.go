@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -131,13 +132,9 @@ func (b *Batcher) flushLoop(ctx context.Context) {
 // BatchFlushCount by up to len(actions)-1.
 func (b *Batcher) Add(ctx context.Context, actions []transform.Action, resumeToken []byte) error {
 	b.mu.Lock()
-	if b.closed {
+	if err := b.unusableLocked(); err != nil {
 		b.mu.Unlock()
-		return fmt.Errorf("batcher is closed")
-	}
-	if b.err != nil {
-		b.mu.Unlock()
-		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
+		return err
 	}
 
 	if len(actions) == 0 {
@@ -181,13 +178,9 @@ func (b *Batcher) Add(ctx context.Context, actions []transform.Action, resumeTok
 // Flush forces a flush of all pending actions via the flush goroutine.
 func (b *Batcher) Flush(ctx context.Context) error {
 	b.mu.Lock()
-	if b.closed {
+	if err := b.unusableLocked(); err != nil {
 		b.mu.Unlock()
-		return fmt.Errorf("batcher is closed")
-	}
-	if b.err != nil {
-		b.mu.Unlock()
-		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
+		return err
 	}
 	pending := b.drainLocked()
 	b.mu.Unlock()
@@ -226,6 +219,18 @@ func (b *Batcher) Close(ctx context.Context) error {
 	<-b.done
 	// flushLoop has exited, so b.err can no longer change.
 	return b.err
+}
+
+// unusableLocked returns why Add and Flush cannot run, or nil if they can.
+// Must be called while holding b.mu.
+func (b *Batcher) unusableLocked() error {
+	if b.closed {
+		return errors.New("batcher is closed")
+	}
+	if b.err != nil {
+		return fmt.Errorf("batcher stopped after a failed flush: %w", b.err)
+	}
+	return nil
 }
 
 // drainLocked extracts the current batch and resets internal state.

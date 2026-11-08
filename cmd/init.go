@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -84,7 +85,7 @@ var validTypes = map[string]bool{
 func promptField() (fieldPrompt, error) {
 	name := prompt("  Field name: ")
 	if name == "" {
-		return fieldPrompt{}, fmt.Errorf("field name is required")
+		return fieldPrompt{}, errors.New("field name is required")
 	}
 
 	var fieldType string
@@ -143,7 +144,7 @@ func promptField() (fieldPrompt, error) {
 func promptCollection() (collectionPrompt, error) {
 	name := prompt("Collection name: ")
 	if name == "" {
-		return collectionPrompt{}, fmt.Errorf("collection name is required")
+		return collectionPrompt{}, errors.New("collection name is required")
 	}
 
 	var namespace config.Namespace

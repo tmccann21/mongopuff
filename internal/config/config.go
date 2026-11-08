@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -46,12 +47,12 @@ type Embed struct {
 }
 
 type FieldMapping struct {
-	Name      string          `yaml:"name"`
-	Type      FieldType       `yaml:"type"`
-	Dimension int             `yaml:"dimension,omitempty"` // vector only
-	Precision VectorPrecision `yaml:"precision,omitempty"` // vector only
-	Filterable *bool          `yaml:"filterable,omitempty"`
-	Embed      *Embed         `yaml:"embed,omitempty"`
+	Name       string          `yaml:"name"`
+	Type       FieldType       `yaml:"type"`
+	Dimension  int             `yaml:"dimension,omitempty"` // vector only
+	Precision  VectorPrecision `yaml:"precision,omitempty"` // vector only
+	Filterable *bool           `yaml:"filterable,omitempty"`
+	Embed      *Embed          `yaml:"embed,omitempty"`
 }
 
 type MappingConfig struct {
@@ -81,22 +82,22 @@ func (c *CollectionConfig) EffectiveBackfillPageSize() int {
 }
 
 type GlobalConfig struct {
-	BatchFlushCount  int `yaml:"batchFlushCount,omitempty"`
-	BatchFlushTimeMs int `yaml:"batchFlushTimeMs,omitempty"`
-	SpoolEnabled     bool `yaml:"spoolEnabled,omitempty"`
-	SpoolDir         string `yaml:"spoolDir,omitempty"`
-	ShutdownTimeoutMs int `yaml:"shutdownTimeoutMs,omitempty"`
+	BatchFlushCount   int    `yaml:"batchFlushCount,omitempty"`
+	BatchFlushTimeMs  int    `yaml:"batchFlushTimeMs,omitempty"`
+	SpoolEnabled      bool   `yaml:"spoolEnabled,omitempty"`
+	SpoolDir          string `yaml:"spoolDir,omitempty"`
+	ShutdownTimeoutMs int    `yaml:"shutdownTimeoutMs,omitempty"`
 }
 
 type ConfigFile struct {
 	Collections []CollectionConfig `yaml:"collections"`
-	Global GlobalConfig `yaml:"global"` 
+	Global      GlobalConfig       `yaml:"global"`
 }
 
 const (
-	DefaultBatchFlushCount  = 1024
-	DefaultBatchFlushTimeMs = 1000 // 1s
-	DefaultSpoolDir = "./data/spool"
+	DefaultBatchFlushCount   = 1024
+	DefaultBatchFlushTimeMs  = 1000 // 1s
+	DefaultSpoolDir          = "./data/spool"
 	DefaultShutdownTimeoutMs = 10000 // 10s
 )
 
@@ -108,7 +109,9 @@ func (g GlobalConfig) FlushInterval() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// ShutdownTimeout TODO: document.
+// ShutdownTimeout returns how long each pipeline's final batch flush may run
+// at shutdown before it is cancelled. A ShutdownTimeoutMs of zero or less
+// means DefaultShutdownTimeoutMs.
 func (g GlobalConfig) ShutdownTimeout() time.Duration {
 	ms := g.ShutdownTimeoutMs
 	if ms <= 0 {
@@ -165,12 +168,12 @@ func LoadEnv() (*AppConfig, error) {
 
 	connStr := os.Getenv("MONGODB_CONNECTION_STRING")
 	if connStr == "" {
-		return nil, fmt.Errorf("MONGODB_CONNECTION_STRING is required")
+		return nil, errors.New("MONGODB_CONNECTION_STRING is required")
 	}
 
 	apiKey := os.Getenv("TURBOPUFFER_API_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("TURBOPUFFER_API_KEY is required")
+		return nil, errors.New("TURBOPUFFER_API_KEY is required")
 	}
 
 	region := os.Getenv("TURBOPUFFER_REGION")

@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -278,10 +278,9 @@ func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.Gl
 	if err != nil {
 		return fmt.Errorf("opening spool: %w", err)
 	}
-	defer sp.Close()
 
 	namespace := p.coll.Mapping.Namespace.String()
-	signal := make(chan struct{}, 1)
+	appended := make(chan struct{}, 1)
 
 	batcher := batch.New(ctx, global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
@@ -307,7 +306,7 @@ func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.Gl
 		)
 
 		select {
-		case signal <- struct{}{}:
+		case appended <- struct{}{}:
 		default:
 		}
 		return nil
@@ -320,7 +319,7 @@ func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.Gl
 	// cancels the other, and Wait returns its error.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, sp.First(), signal)
+		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, sp.First(), appended)
 	})
 	g.Go(func() error {
 		return consumeStream(gctx, stream, batcher, p.coll, p.dlq)

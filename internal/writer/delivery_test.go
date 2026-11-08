@@ -284,7 +284,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	writeSegment(t, sp, makeActions("doc-ok"))
 
 	mock := &mockTpuf{
-		errs: []error{fmt.Errorf("transient turbopuffer error")},
+		errs: []error{errors.New("transient turbopuffer error")},
 	}
 	w := New(mock, noopDLQ{})
 

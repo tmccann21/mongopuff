@@ -13,8 +13,6 @@ func TestAppendRead_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	want := []byte("hello, spool")
 	seg, err := sp.Append(want)
 	if err != nil {
@@ -36,8 +34,6 @@ func TestAppend_NumbersFromZeroInEmptySpool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	if got := sp.First(); got != 0 {
 		t.Errorf("First() = %d, want 0", got)
 	}
@@ -62,8 +58,6 @@ func TestOpen_ContinuesAfterHighestSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	if got := sp.First(); got != 4 {
 		t.Errorf("First() = %d, want 4", got)
 	}
@@ -99,8 +93,6 @@ func TestOpen_IgnoresTmpFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	segs, err := sp.Segments()
 	if err != nil {
 		t.Fatalf("Segments: %v", err)
@@ -120,12 +112,10 @@ func TestAppend_DoesNotReplaceExistingSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer first.Close()
 	second, err := Open(dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer second.Close()
 
 	seg, err := first.Append([]byte("first"))
 	if err != nil {
@@ -150,8 +140,6 @@ func TestRead_NotExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	_, err = sp.Read(42)
 	if err == nil {
 		t.Fatal("Read of nonexistent segment returned nil error")
@@ -172,8 +160,6 @@ func TestSegments_ReturnsOrderedList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	segs, err := sp.Segments()
 	if err != nil {
 		t.Fatalf("Segments: %v", err)
@@ -188,8 +174,6 @@ func TestSegments_EmptyDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer sp.Close()
-
 	segs, err := sp.Segments()
 	if err != nil {
 		t.Fatalf("Segments: %v", err)

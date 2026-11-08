@@ -23,7 +23,7 @@ type updateDescription struct {
 	RemovedFields []string `bson:"removedFields"`
 }
 
-// LiveChangeStream wraps the driver's ChangeStream and satisfies ChangeStreamIterator.
+// LiveChangeStream wraps the driver's ChangeStream and satisfies cmd.changeStream.
 type LiveChangeStream struct {
 	cs      *mongo.ChangeStream
 	current ChangeEvent
@@ -114,7 +114,7 @@ func (l *LiveChangeStream) Event() ChangeEvent {
 	return l.current
 }
 
-// Err TODO: document.
+// Err returns the error from the last Next call, if any.
 func (l *LiveChangeStream) Err() error {
 	return l.err
 }

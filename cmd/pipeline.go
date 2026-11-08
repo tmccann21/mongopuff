@@ -7,7 +7,8 @@ import (
 	tpuf "github.com/turbopuffer/turbopuffer-go/v2"
 )
 
-// collectionPipeline TODO: document.
+// collectionPipeline bundles one collection's configuration, schema, writer, DLQ writer, and store.
+// It has methods for backfilling and running the CDC pipeline.
 type collectionPipeline struct {
 	coll   config.CollectionConfig
 	schema map[string]tpuf.AttributeSchemaConfigParam

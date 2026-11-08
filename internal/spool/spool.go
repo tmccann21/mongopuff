@@ -124,10 +124,6 @@ func (s *Spool) Segments() ([]uint32, error) {
 	return listSegments(s.dir)
 }
 
-func (s *Spool) Close() error {
-	return nil
-}
-
 func (s *Spool) path(segment uint32) string {
 	return filepath.Join(s.dir, fmt.Sprintf("%06d.spool", segment))
 }

@@ -17,7 +17,7 @@ const (
 )
 
 type Store struct {
-	db *mongo.Database
+	db     *mongo.Database
 	client *mongo.Client
 }
 
@@ -86,6 +86,8 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 	return cs, nil
 }
 
+// OpenChangeStream opens a change stream reader for a single collection
+// this is the package-level function using the store's database directly
 func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
 	return OpenChangeStream(ctx, s.db, collection, resumeToken, prePostImages)
 }
@@ -106,7 +108,7 @@ func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
 
 	ts, ok := result["operationTime"].(bson.Timestamp)
 	if !ok {
-		return 0, fmt.Errorf("operationTime not found or unexpected type in ping response")
+		return 0, errors.New("operationTime not found or unexpected type in ping response")
 	}
 
 	return uint64(ts.T)<<32 | uint64(ts.I), nil

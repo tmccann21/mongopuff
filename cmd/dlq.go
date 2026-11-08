@@ -23,7 +23,7 @@ func runDLQ() error {
 
 	connStr := os.Getenv("MONGODB_CONNECTION_STRING")
 	if connStr == "" {
-		return fmt.Errorf("MONGODB_CONNECTION_STRING is required")
+		return errors.New("MONGODB_CONNECTION_STRING is required")
 	}
 
 	store, err := mongo.NewStore(ctx, connStr)

@@ -31,8 +31,8 @@ func (d *dlqWriter) Write(ctx context.Context, entries ...DLQEntry) error {
 }
 
 type DLQStoredEntry struct {
-	ID bson.ObjectID `bson:"_id"`
-	DLQEntry        `bson:",inline"`
+	ID       bson.ObjectID `bson:"_id"`
+	DLQEntry `bson:",inline"`
 }
 
 func (s *Store) ListDLQ(ctx context.Context, collection string, limit int64) ([]DLQStoredEntry, error) {

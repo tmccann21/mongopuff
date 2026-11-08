@@ -33,11 +33,11 @@ type Action struct {
 }
 
 var (
-	// ErrInvalidID TODO: document.
+	// ErrInvalidID is returned when a BSON _id value is not supported.
 	ErrInvalidID = errors.New("invalid _id")
-	// ErrNamespaceUnresolved TODO: document.
+	// ErrNamespaceUnresolved is returned when a dynamic namespace cannot be resolved.
 	ErrNamespaceUnresolved = errors.New("namespace unresolved")
-	// ErrTypeMismatch TODO: document.
+	// ErrTypeMismatch is returned when a BSON value cannot be coerced to the expected type.
 	ErrTypeMismatch = errors.New("type mismatch")
 )
 
@@ -103,7 +103,7 @@ func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Ac
 	case mongo.OpDelete:
 		return mapDelete(event, coll)
 	case mongo.OpInvalidate:
-		return nil, fmt.Errorf("change stream invalidated: resume token is no longer valid, re-backfill required")
+		return nil, errors.New("change stream invalidated: resume token is no longer valid, re-backfill required")
 	default:
 		// Rename, drop, and any operation not handled above need no write.
 		return nil, nil

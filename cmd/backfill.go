@@ -52,7 +52,14 @@ func runBackfill() error {
 	return p.backfill(ctx)
 }
 
-// backfill TODO: document.
+// backfill scans the collection in _id order, one page at a time, and upserts
+// each page into turbopuffer. It saves the last _id of each page as a cursor,
+// so a stopped or crashed backfill resumes where it left off, and stops at the
+// first empty page. Page size comes from config.
+//
+// Each page is stamped with the cluster time read just before it is scanned.
+// Upserts only replace an older cluster time, so a CDC event that changes a
+// document during the backfill wins over the page's earlier copy.
 func (p *collectionPipeline) backfill(ctx context.Context) error {
 	slog.Info("starting backfill", "collection", p.coll.Name)
 	scanner := p.store.CollectionScanner(p.coll.Name)
