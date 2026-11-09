@@ -36,19 +36,15 @@ func formatNamespaceValue(val any) (string, error) {
 	case string:
 		return v, nil
 	case int32, int64, float64:
-		n, err := coerceInt(v)
+		n, err := toInt64(v)
 		if err != nil {
 			return "", err
 		}
-		return strconv.FormatInt(n.(int64), 10), nil
+		return strconv.FormatInt(n, 10), nil
 	case bson.ObjectID:
 		return v.Hex(), nil
 	case bson.Binary:
-		s, err := coerceUUID(v)
-		if err != nil {
-			return "", err
-		}
-		return s.(string), nil
+		return uuidString(v)
 	default:
 		return "", fmt.Errorf("unsupported type %T", val)
 	}

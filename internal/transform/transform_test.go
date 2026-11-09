@@ -491,7 +491,7 @@ func TestMapChangeEvent_FailureWrapsSentinel(t *testing.T) {
 			want: ErrNamespaceUnresolved,
 		},
 		{
-			// coerceInt rejects the value, but it is a namespace failure, not
+			// toInt64 rejects the value, but it is a namespace failure, not
 			// a mapped field's type mismatch.
 			name: "insert_namespace_value_fractional",
 			event: mongo.ChangeEvent{

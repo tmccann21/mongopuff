@@ -73,13 +73,11 @@ func SerializeID(id any) (string, error) {
 	case int64:
 		return strconv.FormatInt(v, 10), nil
 	case bson.Binary:
-		if v.Subtype != bson.TypeBinaryUUID {
-			return "", fmt.Errorf("%w: unsupported binary subtype 0x%02x", ErrInvalidID, v.Subtype)
+		s, err := uuidString(v)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidID, err)
 		}
-		if len(v.Data) != 16 {
-			return "", fmt.Errorf("%w: UUID binary has invalid length %d, expected 16", ErrInvalidID, len(v.Data))
-		}
-		return formatUUID(v.Data), nil
+		return s, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported type %T", ErrInvalidID, id)
 	}
@@ -363,7 +361,16 @@ func coerceFloat(val any) (any, error) {
 	}
 }
 
+// coerceInt adapts toInt64 to the signature coerceArray takes.
 func coerceInt(val any) (any, error) {
+	n, err := toInt64(val)
+	if err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func toInt64(val any) (int64, error) {
 	switch v := val.(type) {
 	case int32:
 		return int64(v), nil
@@ -371,11 +378,11 @@ func coerceInt(val any) (any, error) {
 		return v, nil
 	case float64:
 		if v != math.Trunc(v) {
-			return nil, fmt.Errorf("float64 %v has fractional part, cannot coerce to int", v)
+			return 0, fmt.Errorf("float64 %v has fractional part, cannot coerce to int", v)
 		}
 		return int64(v), nil
 	default:
-		return nil, fmt.Errorf("cannot coerce %T to int", val)
+		return 0, fmt.Errorf("cannot coerce %T to int", val)
 	}
 }
 
@@ -418,18 +425,27 @@ func coerceBool(val any) (any, error) {
 	return val, nil
 }
 
+// coerceUUID adapts uuidString to the signature coerceArray takes.
 func coerceUUID(val any) (any, error) {
 	v, ok := val.(bson.Binary)
 	if !ok {
 		return nil, fmt.Errorf("expected Binary, got %T", val)
 	}
-	if v.Subtype != bson.TypeBinaryUUID {
-		return nil, fmt.Errorf("expected UUID binary subtype, got 0x%02x", v.Subtype)
+	s, err := uuidString(v)
+	if err != nil {
+		return nil, err
 	}
-	if len(v.Data) != 16 {
-		return nil, fmt.Errorf("UUID binary has invalid length %d, expected 16", len(v.Data))
+	return s, nil
+}
+
+func uuidString(b bson.Binary) (string, error) {
+	if b.Subtype != bson.TypeBinaryUUID {
+		return "", fmt.Errorf("expected UUID binary subtype, got 0x%02x", b.Subtype)
 	}
-	return formatUUID(v.Data), nil
+	if len(b.Data) != 16 {
+		return "", fmt.Errorf("UUID binary has invalid length %d, expected 16", len(b.Data))
+	}
+	return formatUUID(b.Data), nil
 }
 
 func coerceDatetime(val any) (any, error) {
