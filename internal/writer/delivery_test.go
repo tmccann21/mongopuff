@@ -275,7 +275,8 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	mock := &mockTpuf{
 		errs: []error{errors.New("transient turbopuffer error")},
 	}
-	w := New(mock, noopDLQ{})
+	dlq := &recordingDLQ{}
+	w := New(mock, dlq)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -297,6 +298,9 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	}
 
 	// The failed write went to the DLQ, so segment 0 is handled and removed.
+	if got, want := dlqDocIDs(dlq.getEntries()), []string{"doc-fail"}; !slices.Equal(got, want) {
+		t.Errorf("DLQ doc IDs = %v, want %v", got, want)
+	}
 	assertSegmentsRemoved(t, sp, 0, 1)
 }
 

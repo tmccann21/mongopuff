@@ -111,19 +111,22 @@ func TestVerifyPreImages(t *testing.T) {
 	}
 }
 
+// failingLister fails the test if checkPreImages lists collections.
+type failingLister struct {
+	t *testing.T
+}
+
+func (l failingLister) ListCollectionSpecifications(_ context.Context, names []string) ([]mongodriver.CollectionSpecification, error) {
+	l.t.Fatalf("checkPreImages queried MongoDB for static collections: listCollections %v", names)
+	return nil, nil
+}
+
 func TestCheckPreImages_StaticNamespacesSkipListCollections(t *testing.T) {
 	// listCollections needs a privilege that a static deployment's user may
 	// not have been granted, so querying it for static collections could stop
-	// an existing deployment from starting. The store is nil: any query
-	// panics, and the recover turns that into a test failure.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("checkPreImages queried MongoDB for static collections: %v", r)
-		}
-	}()
-
+	// an existing deployment from starting.
 	collections := []config.CollectionConfig{collConfig("users", "users"), collConfig("orders", "order_data")}
-	if err := checkPreImages(context.Background(), nil, collections); err != nil {
+	if err := checkPreImages(context.Background(), failingLister{t: t}, collections); err != nil {
 		t.Fatalf("checkPreImages: %v", err)
 	}
 }

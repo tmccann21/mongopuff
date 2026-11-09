@@ -7,12 +7,16 @@ import (
 	"log/slog"
 
 	"github.com/tmccann21/mongopuff/internal/config"
-	"github.com/tmccann21/mongopuff/internal/mongo"
 
 	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-func checkPreImages(ctx context.Context, store *mongo.Store, collections []config.CollectionConfig) error {
+// collectionLister is the part of *mongo.Store that checkPreImages uses.
+type collectionLister interface {
+	ListCollectionSpecifications(ctx context.Context, names []string) ([]mongodriver.CollectionSpecification, error)
+}
+
+func checkPreImages(ctx context.Context, lister collectionLister, collections []config.CollectionConfig) error {
 	var names []string
 	for _, c := range collections {
 		if c.Mapping.Namespace.IsDynamic() {
@@ -23,7 +27,7 @@ func checkPreImages(ctx context.Context, store *mongo.Store, collections []confi
 		return nil
 	}
 
-	specs, err := store.ListCollectionSpecifications(ctx, names)
+	specs, err := lister.ListCollectionSpecifications(ctx, names)
 	if err != nil {
 		return fmt.Errorf("listing collections for pre-image check: %w", err)
 	}
