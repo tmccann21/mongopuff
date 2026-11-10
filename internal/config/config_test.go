@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -247,5 +249,68 @@ func TestValidate_GlobalOverrides(t *testing.T) {
 	}
 	if eff.BatchFlushTimeMs != DefaultBatchFlushTimeMs {
 		t.Errorf("got flush time %d, want %d (default)", eff.BatchFlushTimeMs, DefaultBatchFlushTimeMs)
+	}
+}
+
+// writeConfigFile writes data to a config file in a new temporary directory
+// and returns its path.
+func writeConfigFile(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mongopuff.yaml")
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The loader fills in the default, so a config without a namespace passes
+// Validate. Moving the loader once dropped it without a failing test.
+func TestLoadConfigFile_NamespaceDefaultsToCollectionName(t *testing.T) {
+	path := writeConfigFile(t, `
+collections:
+  - name: orders
+    mapping:
+      fields:
+        - name: total
+          type: float
+  - name: users
+    mapping:
+      namespace: user_data
+      fields:
+        - name: email
+          type: string
+`)
+
+	collections, _, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+
+	want := map[string]string{"orders": "orders", "users": "user_data"}
+	for _, c := range collections {
+		if got := c.Mapping.Namespace.String(); got != want[c.Name] {
+			t.Errorf("collection %q: got namespace %q, want %q", c.Name, got, want[c.Name])
+		}
+	}
+}
+
+// MongoDB allows collection names that turbopuffer rejects as namespaces. The
+// default must fail at load like a configured name, not on every write.
+func TestLoadConfigFile_InvalidDefaultNamespaceFails(t *testing.T) {
+	path := writeConfigFile(t, `
+collections:
+  - name: my orders
+    mapping:
+      fields:
+        - name: total
+          type: float
+`)
+
+	_, _, err := LoadConfigFile(path)
+	if err == nil {
+		t.Fatal("expected an error for a collection name that is not a valid namespace")
+	}
+	if !strings.Contains(err.Error(), `"my orders"`) {
+		t.Errorf("error %q should name the collection", err)
 	}
 }

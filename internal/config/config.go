@@ -208,5 +208,20 @@ func LoadConfigFile(path string) ([]CollectionConfig, GlobalConfig, error) {
 		return nil, GlobalConfig{}, err
 	}
 
+	// A collection without a namespace writes to the one named after it. A
+	// parsed Namespace is never empty, so an empty one was not set. The name
+	// goes through ParseNamespace, so a name turbopuffer rejects fails here.
+	for i := range cfg.Collections {
+		c := &cfg.Collections[i]
+		if c.Mapping.Namespace.String() != "" {
+			continue
+		}
+		ns, err := ParseNamespace(c.Name)
+		if err != nil {
+			return nil, GlobalConfig{}, fmt.Errorf("collection %q has no namespace, and its name is not a valid default: %w", c.Name, err)
+		}
+		c.Mapping.Namespace = ns
+	}
+
 	return cfg.Collections, cfg.Global, nil
 }
