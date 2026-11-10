@@ -10,12 +10,21 @@ import (
 	"github.com/tmccann21/mongopuff/internal/config"
 )
 
-// resolveNamespace resolves ns against doc. A {{field}} that is absent from
-// doc or null fails, as does a value formatNamespaceValue rejects or a
-// resolved name that breaks turbopuffer's rules. Every failure wraps
-// ErrNamespaceUnresolved.
+// errImageUnavailable is the failure for a namespace resolved from a document
+// image the event does not carry: an update or replace without its post-image,
+// or an update, replace or delete without its pre-image.
+var errImageUnavailable = errors.New("document image unavailable")
+
+// resolveNamespace resolves ns against doc. A nil doc fails, as does a
+// {{field}} that is absent from doc or null, a value formatNamespaceValue
+// rejects, or a resolved name that breaks turbopuffer's rules. Every failure
+// wraps ErrNamespaceUnresolved. A static namespace never reads doc, so the
+// static stream, which requests no images, resolves with a nil one.
 func resolveNamespace(ns config.Namespace, doc map[string]any) (string, error) {
 	name, err := ns.Resolve(func(field string) (string, error) {
+		if doc == nil {
+			return "", errImageUnavailable
+		}
 		val, ok := doc[field]
 		if !ok || val == nil {
 			return "", errors.New("absent or null")

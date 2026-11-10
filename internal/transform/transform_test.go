@@ -2,6 +2,7 @@ package transform
 
 import (
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 
@@ -230,15 +231,17 @@ func TestMapChangeEvent_DynamicNamespace_InsertResolvesFromFullDocument(t *testi
 	}
 }
 
-// Replace: namespace resolved from fullDocument.
+// Replace within a namespace: one upsert into the namespace both images
+// resolve to.
 func TestMapChangeEvent_DynamicNamespace_ReplaceResolvesFromFullDocument(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
 	actions, err := MapChangeEvent(mongo.ChangeEvent{
-		Operation:    mongo.OpReplace,
-		DocumentID:   oid,
-		FullDocument: map[string]any{"tenant": "beta", "name": "bob"},
-		ClusterTime:  SerializeClusterTime(10, 2),
+		Operation:                mongo.OpReplace,
+		DocumentID:               oid,
+		FullDocument:             map[string]any{"tenant": "beta", "name": "bob"},
+		FullDocumentBeforeChange: map[string]any{"tenant": "beta", "name": "bill"},
+		ClusterTime:              SerializeClusterTime(10, 2),
 	}, testDynColl(dynTestFields))
 	if err != nil {
 		t.Fatal(err)
@@ -258,9 +261,9 @@ func TestMapChangeEvent_DynamicNamespace_ReplaceResolvesFromFullDocument(t *test
 	}
 }
 
-// Update (non-transition): namespace resolved from fullDocument (post-image).
-// FullDocumentBeforeChange is nil — if the implementation reads from it instead
-// of FullDocument, namespace resolution will fail and the test will catch it.
+// Update within a namespace: one patch into the namespace both images resolve
+// to. TransitionProducesTwoActions checks which image each namespace comes
+// from.
 func TestMapChangeEvent_DynamicNamespace_UpdateResolvesFromFullDocument(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
@@ -268,7 +271,7 @@ func TestMapChangeEvent_DynamicNamespace_UpdateResolvesFromFullDocument(t *testi
 		Operation:                mongo.OpUpdate,
 		DocumentID:               oid,
 		FullDocument:             map[string]any{"tenant": "acme", "name": "carol"},
-		FullDocumentBeforeChange: nil,
+		FullDocumentBeforeChange: map[string]any{"tenant": "acme", "name": "alice"},
 		UpdatedFields:            map[string]any{"name": "carol"},
 		ClusterTime:              SerializeClusterTime(10, 3),
 	}, testDynColl(dynTestFields))
@@ -279,6 +282,9 @@ func TestMapChangeEvent_DynamicNamespace_UpdateResolvesFromFullDocument(t *testi
 		t.Fatalf("expected 1 action for non-transition update, got %d", len(actions))
 	}
 	action := actions[0]
+	if action.Type != ActionPatch {
+		t.Fatalf("got action type %v, want ActionPatch", action.Type)
+	}
 	if action.Namespace != "events_acme" {
 		t.Errorf("got namespace %q, want %q", action.Namespace, "events_acme")
 	}
@@ -311,47 +317,138 @@ func TestMapChangeEvent_DynamicNamespace_DeleteResolvesFromFullDocumentBeforeCha
 	}
 }
 
-// Namespace transition: update that modifies the namespace field produces two actions.
-// First: delete targeting the old namespace (resolved from fullDocumentBeforeChange).
-// Second: upsert targeting the new namespace (resolved from fullDocument).
+// Namespace transition: an update or replace that modifies the namespace field
+// produces two actions. First: delete targeting the old namespace (resolved
+// from fullDocumentBeforeChange). Second: upsert targeting the new namespace
+// (resolved from fullDocument).
 func TestMapChangeEvent_DynamicNamespace_TransitionProducesTwoActions(t *testing.T) {
 	oid := mustObjectID("507f1f77bcf86cd799439011")
 
-	actions, err := MapChangeEvent(mongo.ChangeEvent{
-		Operation:                mongo.OpUpdate,
-		DocumentID:               oid,
-		FullDocument:             map[string]any{"tenant": "beta", "name": "alice"},
-		FullDocumentBeforeChange: map[string]any{"tenant": "acme", "name": "alice"},
-		UpdatedFields:            map[string]any{"tenant": "beta"},
-		ClusterTime:              SerializeClusterTime(10, 6),
-	}, testDynColl(dynTestFields))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(actions) != 2 {
-		t.Fatalf("expected 2 actions for namespace transition, got %d", len(actions))
+	tests := []struct {
+		name          string
+		op            mongo.Operation
+		fields        []config.FieldMapping
+		updatedFields map[string]any
+		wantAttrs     map[string]any
+	}{
+		{
+			name:          "update",
+			op:            mongo.OpUpdate,
+			fields:        dynTestFields,
+			updatedFields: map[string]any{"tenant": "beta"},
+			wantAttrs:     map[string]any{"tenant": "beta", "name": "alice"},
+		},
+		{
+			name:      "replace",
+			op:        mongo.OpReplace,
+			fields:    dynTestFields,
+			wantAttrs: map[string]any{"tenant": "beta", "name": "alice"},
+		},
+		{
+			// tenant only routes the document and is not stored, so a patch
+			// would carry no attributes. The move must still be detected,
+			// not skipped as an update that changed nothing mapped.
+			name:          "update_unmapped_namespace_field",
+			op:            mongo.OpUpdate,
+			fields:        []config.FieldMapping{{Name: "name", Type: config.FieldTypeString}},
+			updatedFields: map[string]any{"tenant": "beta"},
+			wantAttrs:     map[string]any{"name": "alice"},
+		},
 	}
 
-	del := actions[0]
-	if del.Type != ActionDelete {
-		t.Errorf("actions[0]: got type %d, want ActionDelete", del.Type)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actions, err := MapChangeEvent(mongo.ChangeEvent{
+				Operation:                tt.op,
+				DocumentID:               oid,
+				FullDocument:             map[string]any{"tenant": "beta", "name": "alice"},
+				FullDocumentBeforeChange: map[string]any{"tenant": "acme", "name": "alice"},
+				UpdatedFields:            tt.updatedFields,
+				ClusterTime:              SerializeClusterTime(10, 6),
+			}, testDynColl(tt.fields))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(actions) != 2 {
+				t.Fatalf("expected 2 actions for namespace transition, got %d: %+v", len(actions), actions)
+			}
+
+			del := actions[0]
+			if del.Type != ActionDelete {
+				t.Errorf("actions[0]: got type %v, want ActionDelete", del.Type)
+			}
+			if del.Namespace != "events_acme" {
+				t.Errorf("actions[0]: got namespace %q, want %q (old namespace from fullDocumentBeforeChange)", del.Namespace, "events_acme")
+			}
+			if del.DocumentID != "507f1f77bcf86cd799439011" {
+				t.Errorf("actions[0]: got document ID %q, want %q", del.DocumentID, "507f1f77bcf86cd799439011")
+			}
+
+			ups := actions[1]
+			if ups.Type != ActionUpsert {
+				t.Errorf("actions[1]: got type %v, want ActionUpsert", ups.Type)
+			}
+			if ups.Namespace != "events_beta" {
+				t.Errorf("actions[1]: got namespace %q, want %q (new namespace from fullDocument)", ups.Namespace, "events_beta")
+			}
+			if ups.DocumentID != "507f1f77bcf86cd799439011" {
+				t.Errorf("actions[1]: got document ID %q, want %q", ups.DocumentID, "507f1f77bcf86cd799439011")
+			}
+			if !maps.Equal(ups.Attributes, tt.wantAttrs) {
+				t.Errorf("actions[1]: got attributes %v, want every mapped field of the post-image %v", ups.Attributes, tt.wantAttrs)
+			}
+		})
 	}
-	if del.Namespace != "events_acme" {
-		t.Errorf("actions[0]: got namespace %q, want %q (old namespace from fullDocumentBeforeChange)", del.Namespace, "events_acme")
-	}
-	if del.DocumentID != "507f1f77bcf86cd799439011" {
-		t.Errorf("actions[0]: got document ID %q, want %q", del.DocumentID, "507f1f77bcf86cd799439011")
+}
+
+// An update whose pre-image is present but resolves to no namespace, while
+// its post-image does. The document's earlier write went to the DLQ, so
+// turbopuffer may hold no copy of it: the post-image is written in full,
+// since turbopuffer ignores a patch to a document it does not have, and
+// there is nothing to delete.
+func TestMapChangeEvent_DynamicNamespace_UnresolvedPreImageUpsertsPostImage(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+
+	tests := []struct {
+		name     string
+		preImage bson.D
+	}{
+		{name: "field_absent", preImage: bson.D{{Key: "name", Value: "alice"}}},
+		{name: "field_null", preImage: bson.D{{Key: "tenant", Value: nil}, {Key: "name", Value: "alice"}}},
+		{name: "value_type_unsupported", preImage: bson.D{{Key: "tenant", Value: true}, {Key: "name", Value: "alice"}}},
+		{name: "name_invalid", preImage: bson.D{{Key: "tenant", Value: "acme corp"}, {Key: "name", Value: "alice"}}},
 	}
 
-	ups := actions[1]
-	if ups.Type != ActionUpsert {
-		t.Errorf("actions[1]: got type %d, want ActionUpsert", ups.Type)
-	}
-	if ups.Namespace != "events_beta" {
-		t.Errorf("actions[1]: got namespace %q, want %q (new namespace from fullDocument)", ups.Namespace, "events_beta")
-	}
-	if ups.DocumentID != "507f1f77bcf86cd799439011" {
-		t.Errorf("actions[1]: got document ID %q, want %q", ups.DocumentID, "507f1f77bcf86cd799439011")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Only tenant changed, so a patch would carry it alone and an
+			// implementation that patched would be caught by the attributes.
+			actions, err := MapChangeEvent(mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocument:             decodedDoc(t, bson.D{{Key: "tenant", Value: "acme"}, {Key: "name", Value: "alice"}}),
+				FullDocumentBeforeChange: decodedDoc(t, tt.preImage),
+				UpdatedFields:            map[string]any{"tenant": "acme"},
+				ClusterTime:              SerializeClusterTime(10, 8),
+			}, testDynColl(dynTestFields))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(actions) != 1 {
+				t.Fatalf("got %d actions, want one upsert and no delete: %+v", len(actions), actions)
+			}
+			ups := actions[0]
+			if ups.Type != ActionUpsert {
+				t.Errorf("got type %v, want ActionUpsert", ups.Type)
+			}
+			if ups.Namespace != "events_acme" {
+				t.Errorf("got namespace %q, want %q", ups.Namespace, "events_acme")
+			}
+			want := map[string]any{"tenant": "acme", "name": "alice"}
+			if !maps.Equal(ups.Attributes, want) {
+				t.Errorf("got attributes %v, want every mapped field of the post-image %v", ups.Attributes, want)
+			}
+		})
 	}
 }
 
@@ -371,31 +468,75 @@ func TestMapChangeEvent_DynamicNamespace_MissingFieldReturnsError(t *testing.T) 
 	}
 }
 
-// A dynamic stream requests the post-image with whenAvailable, so an update
-// arrives without fullDocument when the image has expired or was never
-// recorded. Its namespace cannot be resolved, and the caller routes it to the
-// DLQ rather than guessing from the pre-image.
-func TestMapChangeEvent_DynamicNamespace_UpdateWithoutPostImageReturnsError(t *testing.T) {
+// A dynamic stream requests both images with whenAvailable, so an update or
+// replace arrives without one when the image has expired or was never
+// recorded. Without the post-image the new namespace is unknown; without the
+// pre-image the old one is, so a move cannot be told from an update in place.
+// Either way the event goes to the DLQ rather than being guessed from the
+// image that is there, even when none of its mapped fields changed.
+func TestMapChangeEvent_DynamicNamespace_MissingImageReturnsError(t *testing.T) {
+	oid := mustObjectID("507f1f77bcf86cd799439011")
+	doc := map[string]any{"tenant": "acme", "name": "alice"}
+
 	tests := []struct {
-		name     string
-		preImage map[string]any
+		name  string
+		event mongo.ChangeEvent
 	}{
-		{name: "pre_image_present", preImage: map[string]any{"tenant": "acme", "name": "alice"}},
-		{name: "pre_image_absent"},
+		{
+			name: "update_post_image_absent",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpUpdate,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: doc,
+				UpdatedFields:            map[string]any{"name": "carol"},
+			},
+		},
+		{
+			name: "update_pre_image_absent",
+			event: mongo.ChangeEvent{
+				Operation:     mongo.OpUpdate,
+				DocumentID:    oid,
+				FullDocument:  doc,
+				UpdatedFields: map[string]any{"name": "carol"},
+			},
+		},
+		{
+			name: "update_both_images_absent",
+			event: mongo.ChangeEvent{
+				Operation:     mongo.OpUpdate,
+				DocumentID:    oid,
+				UpdatedFields: map[string]any{"name": "carol"},
+			},
+		},
+		{
+			// With a static namespace this update produces no actions. A
+			// dynamic one cannot tell whether an unmapped field moved the
+			// document.
+			name: "update_both_images_absent_unmapped_field",
+			event: mongo.ChangeEvent{
+				Operation:     mongo.OpUpdate,
+				DocumentID:    oid,
+				UpdatedFields: map[string]any{"phone": "555-1234"},
+			},
+		},
+		{
+			name: "replace_pre_image_absent",
+			event: mongo.ChangeEvent{
+				Operation:    mongo.OpReplace,
+				DocumentID:   oid,
+				FullDocument: doc,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actions, err := MapChangeEvent(mongo.ChangeEvent{
-				Operation:                mongo.OpUpdate,
-				DocumentID:               mustObjectID("507f1f77bcf86cd799439011"),
-				FullDocumentBeforeChange: tt.preImage,
-				UpdatedFields:            map[string]any{"name": "carol"},
-				ClusterTime:              SerializeClusterTime(10, 7),
-			}, testDynColl(dynTestFields))
+			tt.event.ClusterTime = SerializeClusterTime(10, 7)
+			actions, err := MapChangeEvent(tt.event, testDynColl(dynTestFields))
 			if err == nil {
-				t.Fatalf("expected error for update without a post-image, got actions %+v", actions)
+				t.Fatalf("expected error for a missing image, got actions %+v", actions)
 			}
+			checkSentinel(t, err, ErrNamespaceUnresolved)
 		})
 	}
 }
@@ -529,17 +670,6 @@ func TestMapChangeEvent_FailureWrapsSentinel(t *testing.T) {
 			want: ErrNamespaceUnresolved,
 		},
 		{
-			name: "update_pre_image_namespace_absent",
-			event: mongo.ChangeEvent{
-				Operation:                mongo.OpUpdate,
-				DocumentID:               oid,
-				FullDocumentBeforeChange: decodedDoc(t, bson.D{{Key: "name", Value: "alice"}}),
-				FullDocument:             decodedDoc(t, good),
-				UpdatedFields:            decodedDoc(t, bson.D{{Key: "name", Value: "carol"}}),
-			},
-			want: ErrNamespaceUnresolved,
-		},
-		{
 			name: "update_post_image_absent",
 			event: mongo.ChangeEvent{
 				Operation:                mongo.OpUpdate,
@@ -587,6 +717,21 @@ func TestMapChangeEvent_FailureWrapsSentinel(t *testing.T) {
 			event: mongo.ChangeEvent{
 				Operation:  mongo.OpDelete,
 				DocumentID: oid,
+			},
+			want: ErrNamespaceUnresolved,
+		},
+		{
+			// The pre-image is present but names no namespace. An update in
+			// this state upserts, since turbopuffer may hold no copy; a
+			// delete must not be dropped on the same reasoning, because the
+			// copy may be there under a namespace this event cannot name,
+			// left by an earlier update that removed the field and was
+			// DLQ'd. The operator has to find it.
+			name: "delete_pre_image_namespace_absent",
+			event: mongo.ChangeEvent{
+				Operation:                mongo.OpDelete,
+				DocumentID:               oid,
+				FullDocumentBeforeChange: decodedDoc(t, bson.D{{Key: "name", Value: "alice"}}),
 			},
 			want: ErrNamespaceUnresolved,
 		},

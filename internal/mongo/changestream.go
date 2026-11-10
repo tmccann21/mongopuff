@@ -33,11 +33,12 @@ type LiveChangeStream struct {
 // OpenChangeStream opens a change stream on the given collection.
 // If resumeToken is non-nil, the stream resumes from that token.
 // Insert and replace events always carry fullDocument. If prePostImages is
-// true, update events also carry fullDocument, the post-image, and update and
-// delete events carry fullDocumentBeforeChange, the pre-image. Both are the
-// document as of the event, and are present only when the collection has
-// changeStreamPreAndPostImages enabled and the image has not expired. If
-// prePostImages is false, update and delete events carry neither image.
+// true, update events also carry fullDocument, the post-image, and update,
+// replace and delete events carry fullDocumentBeforeChange, the pre-image.
+// Both are the document as of the event, and are present only when the
+// collection has changeStreamPreAndPostImages enabled and the image has not
+// expired. If prePostImages is false, update and delete events carry neither
+// image and replace events carry only fullDocument.
 func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
 	opts := changeStreamOptions(resumeToken, prePostImages)
 

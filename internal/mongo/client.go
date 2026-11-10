@@ -70,7 +70,7 @@ type ChangeEvent struct {
 	Operation                Operation
 	DocumentID               any            // raw BSON _id value
 	FullDocument             map[string]any // present for insert/replace; for update, the post-image when requested and available
-	FullDocumentBeforeChange map[string]any // for update and delete, the pre-image when requested and available
+	FullDocumentBeforeChange map[string]any // for update, replace and delete, the pre-image when requested and available
 	UpdatedFields            map[string]any // present for update operations
 	RemovedFields            []string       // present for update operations
 	ClusterTime              uint64         // serialized BSON Timestamp: (T<<32)|I

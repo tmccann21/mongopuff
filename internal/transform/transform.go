@@ -104,12 +104,10 @@ func SerializeClusterTime(t uint32, i uint32) uint64 {
 // every other event produces one Action.
 func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	switch event.Operation {
-	case mongo.OpInsert, mongo.OpReplace:
-		action, err := mapUpsert(event, coll)
-		if err != nil {
-			return nil, err
-		}
-		return []Action{action}, nil
+	case mongo.OpInsert:
+		return mapInsert(event, coll)
+	case mongo.OpReplace:
+		return mapReplace(event, coll)
 	case mongo.OpUpdate:
 		return mapUpdate(event, coll)
 	case mongo.OpDelete:
@@ -148,13 +146,21 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 	}, nil
 }
 
-func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
-	docID, err := SerializeID(event.DocumentID)
-	if err != nil {
-		return Action{}, err
-	}
-
+func mapInsert(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	if err != nil {
+		return nil, err
+	}
+	ups, err := mapUpsert(event, coll, ns)
+	if err != nil {
+		return nil, err
+	}
+	return []Action{ups}, nil
+}
+
+// mapUpsert builds the upsert that writes event's full document into ns.
+func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig, ns string) (Action, error) {
+	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
 		return Action{}, err
 	}
@@ -174,58 +180,93 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 	}, nil
 }
 
-// mapUpdate handles OpUpdate events. When the namespace is dynamic and a pre-image
-// is available, it checks whether the namespace field changed. If it did, a namespace
-// transition is detected and two actions are returned: a delete from the old namespace
-// followed by an upsert into the new namespace. Otherwise the event is a normal patch.
-func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
-	if coll.Mapping.Namespace.IsDynamic() && event.FullDocumentBeforeChange != nil {
-		oldNS, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
-		if err != nil {
-			return nil, err
-		}
-		newNS, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
-		if err != nil {
-			return nil, err
-		}
-		if oldNS != newNS {
-			return mapNamespaceTransition(event, coll, oldNS, newNS)
-		}
+// mapReplace handles OpReplace. The document is written in full to the
+// namespace its post-image resolves to, and deleted from the namespace its
+// pre-image resolves to when that differs.
+func mapReplace(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	move, err := resolveMove(event, coll.Mapping.Namespace)
+	if err != nil {
+		return nil, err
 	}
-
-	return mapPatch(event, coll)
+	return mapMove(event, coll, move)
 }
 
-func mapNamespaceTransition(event mongo.ChangeEvent, coll config.CollectionConfig, oldNS, newNS string) ([]Action, error) {
-	docID, err := SerializeID(event.DocumentID)
+// mapUpdate handles OpUpdate. A document that stays in its namespace is
+// patched with its changed mapped fields. One that moved, or whose earlier
+// write went to the DLQ, is written in full by mapMove.
+func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	move, err := resolveMove(event, coll.Mapping.Namespace)
 	if err != nil {
 		return nil, err
 	}
+	if move.stayed() {
+		return mapPatch(event, coll, move.to)
+	}
+	return mapMove(event, coll, move)
+}
 
-	attrs, err := extractFields(event.FullDocument, coll.Mapping.Fields)
+// namespaceMove is where an update or replace leaves the document: out of
+// the namespace its pre-image resolves to, into the one its post-image
+// resolves to. For a static namespace both are the configured name.
+type namespaceMove struct {
+	from, to string
+	// fromKnown is false when the pre-image is present but its namespace
+	// cannot be resolved. The document's earlier write went to the DLQ, so
+	// turbopuffer may hold no copy of it: the post-image is written in full,
+	// since turbopuffer ignores a patch to a document it does not have, and
+	// nothing is deleted.
+	fromKnown bool
+}
+
+// stayed reports whether the document is still in the namespace it was in.
+func (m namespaceMove) stayed() bool { return m.fromKnown && m.from == m.to }
+
+// moved reports whether the document left the namespace it was in.
+func (m namespaceMove) moved() bool { return m.fromKnown && m.from != m.to }
+
+// resolveMove resolves the namespaces an update or replace moves the document
+// between. An image the event does not carry is an error, since without it
+// the document cannot be placed, even when none of its mapped fields changed.
+func resolveMove(event mongo.ChangeEvent, ns config.Namespace) (namespaceMove, error) {
+	to, err := resolveNamespace(ns, event.FullDocument)
+	if err != nil {
+		return namespaceMove{}, err
+	}
+	from, err := resolveNamespace(ns, event.FullDocumentBeforeChange)
+	if errors.Is(err, errImageUnavailable) {
+		return namespaceMove{}, err
+	}
+	if err != nil {
+		// The pre-image is present but names no namespace; see fromKnown.
+		return namespaceMove{to: to}, nil
+	}
+	return namespaceMove{from: from, to: to, fromKnown: true}, nil
+}
+
+// mapMove writes the post-image in full to the namespace it resolves to and,
+// when the document moved there from another namespace, deletes it from the
+// old one first.
+func mapMove(event mongo.ChangeEvent, coll config.CollectionConfig, move namespaceMove) ([]Action, error) {
+	ups, err := mapUpsert(event, coll, move.to)
 	if err != nil {
 		return nil, err
 	}
-
+	if !move.moved() {
+		return []Action{ups}, nil
+	}
 	del := Action{
 		Type:        ActionDelete,
-		Namespace:   oldNS,
+		Namespace:   move.from,
 		Operation:   event.Operation,
-		DocumentID:  docID,
-		ClusterTime: event.ClusterTime,
-	}
-	ups := Action{
-		Type:        ActionUpsert,
-		Namespace:   newNS,
-		Operation:   event.Operation,
-		DocumentID:  docID,
-		Attributes:  attrs,
+		DocumentID:  ups.DocumentID,
 		ClusterTime: event.ClusterTime,
 	}
 	return []Action{del, ups}, nil
 }
 
-func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+// mapPatch builds the patch that writes an update's changed mapped fields to
+// ns, or no action when none changed.
+func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig, ns string) ([]Action, error) {
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
 		return nil, err
@@ -248,11 +289,6 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, 
 
 	if len(attrs) == 0 {
 		return nil, nil
-	}
-
-	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
-	if err != nil {
-		return nil, err
 	}
 
 	return []Action{{
