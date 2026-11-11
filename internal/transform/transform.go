@@ -22,7 +22,7 @@ const (
 	ActionDelete
 )
 
-// String TODO: document.
+// String returns the string representation of the ActionType.
 func (t ActionType) String() string {
 	switch t {
 	case ActionUpsert:
