@@ -82,6 +82,7 @@ global:
   batchFlushTimeMs: 1000            # max ms before flushing a partial batch (default: 1000)
   spoolEnabled: false               # enable durable spool buffer (default: false)
   spoolDir: ./data/spool            # spool directory (default: ./data/spool)
+  shutdownTimeoutMs: 10000          # max ms for each collection's final flush at shutdown (default: 10000)
 ```
 
 ### Field Types
@@ -94,18 +95,53 @@ global:
 
 Only fields listed in the config are synced. Unmapped fields are silently dropped.
 
+### Dynamic Namespaces
+
+A namespace can be a template that sends each document to a namespace built from its own fields:
+
+```yaml
+collections:
+  - name: orders
+    mapping:
+      namespace: "{{tenantId}}_orders"   # must be quoted; see below
+      fields:
+        - name: total
+          type: float
+```
+
+A document with `tenantId: "acme"` is written to the `acme_orders` namespace.
+
+- A `{{field}}` token names a top-level field. Nested paths such as `{{customer.id}}` are not supported. A template can hold several tokens, such as `{{region}}-{{tenantId}}`.
+- A field's value is substituted by type: a string as-is; an int32 or int64 in decimal; a double with no fractional part as an integer (`1e6` becomes `1000000`); an ObjectID as its 24-character hex; a binary UUID in hyphenated form. Any other type is rejected.
+- Every namespace name, static or resolved, must match turbopuffer's rule `[A-Za-z0-9-_.]{1,128}`. A static name, or text outside a template's tokens, that breaks the rule fails when the config loads. A resolved name that breaks it fails for that document.
+- Quote a template that starts with `{{`. Unquoted, YAML reads it as a map and the config fails to load with `cannot unmarshal !!map into string`, or with `did not find expected key` when text follows the token.
+
+An event whose namespace can't be resolved goes to the DLQ with error kind `namespace_unresolved` and is not written to turbopuffer. That happens when a token's field is absent or null, holds a type not listed above, or resolves to a name that breaks the rule. It also happens when the change event lacks a document image it needs: a delete, update or replace needs its pre-image, and an update also needs its post-image, even when it changes no mapped field. An image is missing once it has expired, or when the event happened before pre- and post-images were enabled.
+
+When a document's old namespace can't be resolved, for example because it was inserted without a `tenantId` and went to the DLQ, an update that gives it one writes the whole document to the new namespace.
+
+#### Requirements
+
+A dynamic namespace needs MongoDB 6.0 or later, and `changeStreamPreAndPostImages` enabled on the collection so that its change events carry the document as it was before and after each change:
+
+```js
+db.runCommand({ collMod: "orders", changeStreamPreAndPostImages: { enabled: true } })
+```
+
+At startup, `mongopuff run` checks each collection with a dynamic namespace and exits with an error if the collection doesn't exist or doesn't have the option enabled. mongopuff never changes the setting itself. The check runs `listCollections`, so the MongoDB user needs that privilege on the database; the built-in `read` role includes it. A static namespace needs none of this.
+
 ### Config Validation
 
 ```
 mongopuff validate mongopuff.yaml
 ```
 
-Checks YAML syntax, duplicate namespaces, valid field types, and vector field completeness.
+Checks YAML syntax, duplicate namespaces, namespace names and templates, valid field types, and vector field completeness. It doesn't connect to MongoDB, so the pre-image check for dynamic namespaces runs only when `mongopuff run` starts.
 
 ## Commands
 
 ### `mongopuff run`
-Start the CDC pipeline. Opens a change stream per collection, batches events, and writes them to turbopuffer. Handles `SIGINT`/`SIGTERM` for graceful shutdown.
+Start the CDC pipeline. Opens a change stream per collection, batches events, and writes them to turbopuffer. Handles `SIGINT`/`SIGTERM` for graceful shutdown: each collection flushes its last batch and gives up after `shutdownTimeoutMs`. Events it didn't flush are replayed from the change stream on the next start. `run` logs a warning when `shutdownTimeoutMs` is over 30s, Kubernetes' default termination grace period, after which a pod that is still flushing is killed.
 
 ### `mongopuff backfill --collection=<name>`
 Bulk-sync all existing documents from a collection to turbopuffer. Resume-safe: if interrupted, subsequent runs pick up from the last cursor position.
@@ -138,24 +174,29 @@ This project was inspired by the work of the A24 team on [puffgres](https://gith
 
 ### Change Data Capture
 
-mongopuff opens a [change stream](https://www.mongodb.com/docs/manual/changeStreams/) per collection. Each change event is transformed into a turbopuffer write:
+mongopuff opens a [change stream](https://www.mongodb.com/docs/manual/changeStreams/) per collection. Each change event is transformed into turbopuffer writes:
 
 | MongoDB operation | turbopuffer action | behavior |
 |------|--------|----------|
 | insert | upsert | write full document |
 | replace | upsert | write full document |
 | update | patch | write only changed fields, null removed fields |
+| update or replace that changes the namespace | delete and upsert | delete from the old namespace (even if `mirrorDeletes` is disabled), write full document to the new one |
 | delete | delete | delete document (if `mirrorDeletes` enabled) |
 
 Documents are identified by their `_id` field. Supported ID types are ObjectID, string, int32, int64, and binary UUID.
 
+`mirrorDeletes` covers documents deleted in MongoDB. A document that changes namespace still exists, so its copy in the old namespace is always deleted.
+
+Moving a document between namespaces takes two writes, one to each namespace, and is not atomic. Each write that fails goes to the DLQ on its own. A failed delete leaves the document in both namespaces, and a failed upsert leaves it in neither, until the DLQ entry is resolved. Where namespaces separate tenants, a failed delete means the old tenant can still see the document.
+
 ### Batching
 
-Events are accumulated in an in-memory batch and flushed when either the count threshold (`batchFlushCount`) or time threshold (`batchFlushTimeMs`) is reached. Within a batch, if the same document is modified multiple times, only the latest action is kept.
+Events are accumulated in an in-memory batch and flushed when either the count threshold (`batchFlushCount`) or time threshold (`batchFlushTimeMs`) is reached. Within a batch, if the same document is modified multiple times, only the latest action for it in each namespace is kept, so a document that moves namespaces keeps both its delete and its upsert.
 
 ### Delivery
 
-mongopuff replication uses conditional writes in turbopuffer to perform effectively-once delivery. It persists a change stream cursor to resume event processing after a crash and a dead-letter queue to replay failed writes during a turbopuffer outage.
+mongopuff replication uses conditional writes in turbopuffer to perform effectively-once delivery. It persists a change stream cursor to resume event processing after a crash.
 
 Under heavy write-load to MongoDB or degraded write performance from turbopuffer, the change stream cursor can drift from the head of the oplog. In extreme cases, the cursor can be evicted from the oplog window and mongopuff loses its position. This is unrecoverable and requires a full backfill. If your use case involves persistent high write-pressure, mongopuff can be run with a durable buffer on change stream reads. In this mode, mongopuff writes change events to disk before delivering to turbopuffer, allowing the consumer to keep pace with the oplog without blocking on network I/O.
 
@@ -167,11 +208,13 @@ change stream --> batcher --> turbopuffer
 change stream --> batcher --> disk --> delivery loop --> turbopuffer
 ```
 
-Enable the spool by setting `spoolEnabled: true` in your config. Each collection gets its own spool directory under `spoolDir`. Segments are written atomically and deleted after successful delivery.
+Enable the spool by setting `spoolEnabled: true` in your config. Each collection gets its own spool directory under `spoolDir`. Segments are written atomically and deleted after successful delivery. The spool directory is the only record of which segments are still to be delivered: on restart, delivery resumes from the oldest segment on disk.
 
 ### Dead-Letter Queue
 
-When a write to turbopuffer fails (network error, rate limit, server error) or a document can't be transformed (type mismatch, unsupported ID type), the event is written to the `_mongopuff_dlq` collection in your database. The stream continues without blocking.
+When a write to turbopuffer fails (network error, rate limit, server error) or a document can't be transformed (type mismatch, unsupported ID type, unresolved namespace), the event is written to the `_mongopuff_dlq` collection in your database and replication continues. A backfill does the same for a document that can't be transformed, and still writes the rest of its page.
+
+If the DLQ write fails too, mongopuff stops that collection's change stream or backfill rather than skip the event. Its resume token or backfill cursor isn't saved past the event, so the event is retried on the next start.
 
 Every entry records the source collection. An entry for a failed turbopuffer write also records the namespace it targeted and the write it attempted (`upsert`, `patch` or `delete`).
 
@@ -182,7 +225,6 @@ Use `mongopuff dlq list` to inspect failures and `mongopuff dlq clear` to clean 
 mongopuff persists its state in the `_mongopuff_state` collection:
 - **Resume token** -- the change stream position, saved after every successful flush. On restart, the stream picks up where it left off.
 - **Backfill cursor** -- the last `_id` processed during a backfill, allowing interrupted backfills to resume.
-- **Spool segment** -- the last spool segment written, so the delivery loop knows where to start.
 
 ### Health Check
 
