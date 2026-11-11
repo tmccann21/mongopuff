@@ -3,8 +3,10 @@ package transform
 import (
 	"errors"
 	"maps"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -1465,6 +1467,72 @@ func TestExtractFields_UnmappedIgnored(t *testing.T) {
 	}
 	if attrs["name"] != "alice" {
 		t.Errorf("got name %v, want %q", attrs["name"], "alice")
+	}
+}
+
+func TestExtractFields_DriverTypes(t *testing.T) {
+	// The document is round-tripped through BSON, so each value has the Go
+	// type the driver decodes it into rather than the type a hand-built input
+	// assumes. A coercion written against a type the driver never produces
+	// fails here.
+	uuid := bson.Binary{
+		Subtype: bson.TypeBinaryUUID,
+		Data: []byte{
+			0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
+			0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+		},
+	}
+	const uuidText = "550e8400-e29b-41d4-a716-446655440000"
+	created := time.Date(2025, 8, 1, 12, 34, 56, 789_000_000, time.UTC)
+	// Before 1970, so BSON stores it as negative milliseconds.
+	preEpoch := time.Date(1969, 7, 20, 20, 17, 40, 250_000_000, time.UTC)
+
+	tests := []struct {
+		field config.FieldMapping
+		value any
+		want  any
+	}{
+		{config.FieldMapping{Name: "name", Type: config.FieldTypeString}, "Pancakes", "Pancakes"},
+		{config.FieldMapping{Name: "servings", Type: config.FieldTypeInt}, int32(4), int64(4)},
+		{config.FieldMapping{Name: "views", Type: config.FieldTypeUint}, int64(1) << 40, uint64(1) << 40},
+		{config.FieldMapping{Name: "calories", Type: config.FieldTypeFloat}, 412.5, 412.5},
+		{config.FieldMapping{Name: "vegetarian", Type: config.FieldTypeBool}, true, true},
+		{config.FieldMapping{Name: "authorId", Type: config.FieldTypeUUID}, uuid, uuidText},
+		{config.FieldMapping{Name: "createdAt", Type: config.FieldTypeDatetime}, created, "2025-08-01T12:34:56.789Z"},
+		{
+			config.FieldMapping{Name: "embedding", Type: config.FieldTypeVector, Dimension: 3, Precision: config.VectorPrecisionF32},
+			bson.A{0.25, 0.5, 1.0},
+			[]float32{0.25, 0.5, 1},
+		},
+		{config.FieldMapping{Name: "tags", Type: config.FieldTypeStringArray}, bson.A{"breakfast", "sweet"}, []any{"breakfast", "sweet"}},
+		{config.FieldMapping{Name: "steps", Type: config.FieldTypeIntArray}, bson.A{int32(1), int64(2)}, []any{int64(1), int64(2)}},
+		{config.FieldMapping{Name: "ratingCounts", Type: config.FieldTypeUintArray}, bson.A{int32(3), int64(5)}, []any{uint64(3), uint64(5)}},
+		{config.FieldMapping{Name: "ratings", Type: config.FieldTypeFloatArray}, bson.A{4.5, int32(5)}, []any{4.5, float64(5)}},
+		{config.FieldMapping{Name: "flags", Type: config.FieldTypeBoolArray}, bson.A{true, false}, []any{true, false}},
+		{config.FieldMapping{Name: "editorIds", Type: config.FieldTypeUUIDArray}, bson.A{uuid}, []any{uuidText}},
+		{
+			config.FieldMapping{Name: "releaseDates", Type: config.FieldTypeDatetimeArray},
+			bson.A{created, preEpoch},
+			[]any{"2025-08-01T12:34:56.789Z", "1969-07-20T20:17:40.250Z"},
+		},
+	}
+
+	d := make(bson.D, 0, len(tests))
+	for _, tt := range tests {
+		d = append(d, bson.E{Key: tt.field.Name, Value: tt.value})
+	}
+	doc := decodedDoc(t, d)
+
+	for _, tt := range tests {
+		t.Run(string(tt.field.Type), func(t *testing.T) {
+			attrs, err := extractFields(doc, []config.FieldMapping{tt.field})
+			if err != nil {
+				t.Fatalf("decoded as %T: %v", doc[tt.field.Name], err)
+			}
+			if got := attrs[tt.field.Name]; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %v (%T), want %v (%T)", got, got, tt.want, tt.want)
+			}
+		})
 	}
 }
 

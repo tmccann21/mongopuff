@@ -211,7 +211,7 @@ func buildEvent(seq int) mongo.ChangeEvent {
 				"vegetarian":  seq%2 == 0,
 				"servings":    int64(seq%8 + 1),
 				"ingredients": bson.A{"flour", "sugar", "butter"},
-				"createdAt":   time.Date(2025, 1, 1, seq, 0, 0, 0, time.UTC),
+				"createdAt":   bson.NewDateTimeFromTime(time.Date(2025, 1, 1, seq, 0, 0, 0, time.UTC)),
 			},
 			ClusterTime: clusterTime,
 		}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -484,11 +483,20 @@ func uuidString(b bson.Binary) (string, error) {
 	return formatUUID(b.Data), nil
 }
 
+// datetimeLayout is RFC 3339 with milliseconds, the precision BSON and
+// turbopuffer both store. A datetime is sent as this text rather than as a
+// time.Time, which the turbopuffer SDK formats with time.RFC3339 and so
+// without milliseconds.
+const datetimeLayout = "2006-01-02T15:04:05.000Z07:00"
+
+// coerceDatetime formats a BSON date as datetime text. The driver decodes a
+// date held in a map as bson.DateTime, never as time.Time.
 func coerceDatetime(val any) (any, error) {
-	if _, ok := val.(time.Time); !ok {
+	v, ok := val.(bson.DateTime)
+	if !ok {
 		return nil, fmt.Errorf("expected datetime, got %T", val)
 	}
-	return val, nil
+	return v.Time().UTC().Format(datetimeLayout), nil
 }
 
 func coerceVector(val any, dimension int) (any, error) {
