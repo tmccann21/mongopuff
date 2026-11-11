@@ -37,7 +37,7 @@ var collectionConfig = func() config.CollectionConfig {
 		Name:          "bench",
 		MirrorDeletes: &mirrorDeletes,
 		Mapping: config.MappingConfig{
-			Namespace: "bench",
+			Namespace: config.MustParseNamespace("bench"),
 			Fields: []config.FieldMapping{
 				{Name: "name", Type: config.FieldTypeString},
 				{Name: "calories", Type: config.FieldTypeFloat},
@@ -145,7 +145,7 @@ func runCollection(ctx context.Context, index int, numEvents int) collectionResu
 	name := fmt.Sprintf("collection_%d", index)
 	collCfg := collectionConfig
 	collCfg.Name = name
-	collCfg.Mapping.Namespace = name
+	collCfg.Mapping.Namespace = config.MustParseNamespace(name)
 	globalCfg := config.GlobalConfig{
 		BatchFlushCount:  batchSize,
 		BatchFlushTimeMs: 60_000, // effectively disable timer flushes — we want count-triggered only
@@ -170,14 +170,14 @@ func runCollection(ctx context.Context, index int, numEvents int) collectionResu
 		event := buildEvent(i)
 
 		tStart := time.Now()
-		action, err := transform.MapChangeEvent(event, collCfg)
+		actions, err := transform.MapChangeEvent(event, collCfg)
 		result.transformTime += time.Since(tStart)
 
 		if err != nil {
 			continue
 		}
 
-		if err := batcher.Add(ctx, action, resumeToken); err != nil {
+		if err := batcher.Add(ctx, actions, resumeToken); err != nil {
 			fmt.Fprintf(os.Stderr, "batcher error: %v\n", err)
 			break
 		}

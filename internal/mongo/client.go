@@ -20,22 +20,40 @@ const (
 type ErrorKind string
 
 const (
-	ErrTypeMismatch  ErrorKind = "type_mismatch"
-	ErrIDMissing     ErrorKind = "id_missing"
-	ErrWriteRejected ErrorKind = "write_rejected"
-	ErrNetworkError  ErrorKind = "network_error"
-	ErrRateLimited   ErrorKind = "rate_limited"
-	ErrServerError   ErrorKind = "server_error"
+	ErrTypeMismatch        ErrorKind = "type_mismatch"
+	ErrIDMissing           ErrorKind = "id_missing"
+	ErrNamespaceUnresolved ErrorKind = "namespace_unresolved"
+	ErrUnknown             ErrorKind = "unknown"
+	ErrWriteRejected       ErrorKind = "write_rejected"
+	ErrNetworkError        ErrorKind = "network_error"
+	ErrRateLimited         ErrorKind = "rate_limited"
+	ErrServerError         ErrorKind = "server_error"
+)
+
+// DLQActionType is the turbopuffer write that a DLQ entry's action failed to
+// make. It is stored, so its values must not change.
+type DLQActionType string
+
+const (
+	DLQActionUpsert DLQActionType = "upsert"
+	DLQActionPatch  DLQActionType = "patch"
+	DLQActionDelete DLQActionType = "delete"
 )
 
 type DLQEntry struct {
-	Collection   string    `bson:"collection"`
-	DocumentID   string    `bson:"documentId"`
-	Operation    Operation `bson:"operation"`
-	ErrorKind    ErrorKind `bson:"errorKind"`
-	ErrorMessage string    `bson:"errorMessage"`
-	ClusterTime  uint64    `bson:"clusterTime"`
-	CreatedAt    time.Time `bson:"createdAt"`
+	// Collection is the source MongoDB collection, never a turbopuffer namespace.
+	Collection string    `bson:"collection"`
+	DocumentID string    `bson:"documentId"`
+	Operation  Operation `bson:"operation"`
+	// Namespace and ActionType record the turbopuffer write that failed. Both
+	// are empty when the event failed before it became a write, such as a
+	// transform failure.
+	Namespace    string        `bson:"namespace,omitempty"`
+	ActionType   DLQActionType `bson:"actionType,omitempty"`
+	ErrorKind    ErrorKind     `bson:"errorKind"`
+	ErrorMessage string        `bson:"errorMessage"`
+	ClusterTime  uint64        `bson:"clusterTime"`
+	CreatedAt    time.Time     `bson:"createdAt"`
 }
 
 // CollectionState is the shape of a document in the _mongopuff_state collection.
@@ -45,20 +63,20 @@ type CollectionState struct {
 	ChangeStreamResumeToken []byte    `bson:"changeStreamResumeToken,omitempty"`
 	BackfillCursor          any       `bson:"backfillCursor,omitempty"`
 	LastFlushTime           time.Time `bson:"lastFlushTime,omitempty"`
-	SpoolSegment            uint32    `bson:"spoolSegment,omitempty"`
 }
 
 // ChangeEvent represents a parsed MongoDB change stream event.
 type ChangeEvent struct {
-	Operation     Operation
-	DocumentID    any            // raw BSON _id value
-	FullDocument  map[string]any // present for insert/replace, may be present for update
-	UpdatedFields map[string]any // present for update operations
-	RemovedFields []string       // present for update operations
-	ClusterTime   uint64         // serialized BSON Timestamp: (T<<32)|I
-	ResumeToken   []byte         // opaque token for resuming
+	Operation                Operation
+	DocumentID               any            // raw BSON _id value
+	FullDocument             map[string]any // present for insert/replace; for update, the post-image when requested and available
+	FullDocumentBeforeChange map[string]any // for update, replace and delete, the pre-image when requested and available
+	UpdatedFields            map[string]any // present for update operations
+	RemovedFields            []string       // present for update operations
+	ClusterTime              uint64         // serialized BSON Timestamp: (T<<32)|I
+	ResumeToken              []byte         // opaque token for resuming
 }
 
 type DLQWriter interface {
-	Write(ctx context.Context, entry DLQEntry) error
+	Write(ctx context.Context, entries ...DLQEntry) error
 }

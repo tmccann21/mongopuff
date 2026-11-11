@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tmccann21/mongopuff/internal/config"
@@ -91,7 +93,7 @@ func TestBatchFlushOnCount(t *testing.T) {
 	defer b.Close(context.Background())
 
 	for i := range 3 {
-		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("id-%d", i)), []byte("tok")); err != nil {
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert(fmt.Sprintf("id-%d", i))}, []byte("tok")); err != nil {
 			t.Fatalf("Add(%d): %v", i, err)
 		}
 	}
@@ -111,7 +113,7 @@ func TestBatchFlushOnInterval(t *testing.T) {
 	b := New(context.Background(), cfg, spy.fn())
 	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,10 +134,10 @@ func TestBatchDedupSameID(t *testing.T) {
 	b := New(context.Background(), cfg, spy.fn())
 	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{upsertAction("a", map[string]any{"v": 1})}, []byte("t1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 2}), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{upsertAction("a", map[string]any{"v": 2})}, []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -160,10 +162,10 @@ func TestBatchDedupInsertThenDelete(t *testing.T) {
 	b := New(context.Background(), cfg, spy.fn())
 	defer b.Close(context.Background())
 
-	if err := b.Add(context.Background(), upsertAction("a", map[string]any{"v": 1}), []byte("t1")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{upsertAction("a", map[string]any{"v": 1})}, []byte("t1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add(context.Background(), deleteAction("a"), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{deleteAction("a")}, []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -176,6 +178,74 @@ func TestBatchDedupInsertThenDelete(t *testing.T) {
 	}
 	if actions[0].Type != transform.ActionDelete {
 		t.Errorf("expected ActionDelete, got %d", actions[0].Type)
+	}
+}
+
+func TestBatchDedupKeyIncludesNamespace(t *testing.T) {
+	spy := &flushSpy{}
+	cfg := testConfig(9999, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
+
+	// A namespace transition emits a delete from the old namespace and an
+	// upsert into the new one for the same document. Deduping on DocumentID
+	// alone would drop the delete and leave a stale copy in the old namespace.
+	del := deleteAction("a")
+	del.Namespace = "tenant-old"
+	ups := upsertAction("a", map[string]any{"v": 1})
+	ups.Namespace = "tenant-new"
+
+	if err := b.Add(context.Background(), []transform.Action{del}, []byte("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Add(context.Background(), []transform.Action{ups}, []byte("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	actions := spy.lastCall().actions
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions (one per namespace), got %d", len(actions))
+	}
+	if actions[0].Namespace != "tenant-old" || actions[0].Type != transform.ActionDelete {
+		t.Errorf("actions[0] = %s/%d, want tenant-old/ActionDelete", actions[0].Namespace, actions[0].Type)
+	}
+	if actions[1].Namespace != "tenant-new" || actions[1].Type != transform.ActionUpsert {
+		t.Errorf("actions[1] = %s/%d, want tenant-new/ActionUpsert", actions[1].Namespace, actions[1].Type)
+	}
+}
+
+func TestBatchEventActionsFlushTogether(t *testing.T) {
+	spy := &flushSpy{}
+	// A count of 1 means the transition's delete alone reaches the threshold.
+	cfg := testConfig(1, 60000)
+	b := New(context.Background(), cfg, spy.fn())
+	defer b.Close(context.Background())
+
+	// If the delete flushed on its own, its flush would save the event's resume
+	// token while the upsert was still pending. A crash before the next flush
+	// would resume past the event and the upsert would never be written,
+	// leaving the document in neither namespace.
+	del := deleteAction("a")
+	del.Namespace = "tenant-old"
+	ups := upsertAction("a", map[string]any{"v": 1})
+	ups.Namespace = "tenant-new"
+
+	if err := b.Add(context.Background(), []transform.Action{del, ups}, []byte("t1")); err != nil {
+		t.Fatal(err)
+	}
+
+	if spy.callCount() != 1 {
+		t.Fatalf("event was split across %d flushes, want 1", spy.callCount())
+	}
+	call := spy.lastCall()
+	if len(call.actions) != 2 {
+		t.Fatalf("flushed %d actions, want 2 (delete and upsert)", len(call.actions))
+	}
+	if string(call.resumeToken) != "t1" {
+		t.Errorf("resume token = %q, want %q", call.resumeToken, "t1")
 	}
 }
 
@@ -193,44 +263,6 @@ func TestBatchEmptyNoFlush(t *testing.T) {
 	}
 }
 
-func TestBatchSkipActionIgnored(t *testing.T) {
-	spy := &flushSpy{}
-	// Count threshold of 2: if skip leaks in, adding the upsert would make count=2 and trigger a flush.
-	cfg := testConfig(2, 60000)
-	b := New(context.Background(), cfg, spy.fn())
-	defer b.Close(context.Background())
-
-	skip := transform.Action{
-		Type:       transform.ActionSkip,
-		DocumentID: "skip-me",
-		Attributes: map[string]any{"big": "data"},
-	}
-	if err := b.Add(context.Background(), skip, []byte("t1")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := b.Add(context.Background(), smallUpsert("a"), []byte("t2")); err != nil {
-		t.Fatal(err)
-	}
-	if spy.callCount() != 0 {
-		t.Fatal("skip action should not have contributed to batch count")
-	}
-
-	if err := b.Flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if spy.callCount() != 1 {
-		t.Fatalf("expected 1 flush, got %d", spy.callCount())
-	}
-	actions := spy.lastCall().actions
-	if len(actions) != 1 {
-		t.Fatalf("expected 1 action (upsert only), got %d", len(actions))
-	}
-	if actions[0].DocumentID != "a" {
-		t.Errorf("expected doc ID %q, got %q", "a", actions[0].DocumentID)
-	}
-}
-
 func TestBatchPreservesInsertionOrder(t *testing.T) {
 	spy := &flushSpy{}
 	cfg := testConfig(9999, 60000)
@@ -238,7 +270,7 @@ func TestBatchPreservesInsertionOrder(t *testing.T) {
 	defer b.Close(context.Background())
 
 	for _, id := range []string{"c", "a", "b"} {
-		if err := b.Add(context.Background(), smallUpsert(id), []byte("tok")); err != nil {
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert(id)}, []byte("tok")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -266,7 +298,7 @@ func TestBatchResumeTokenTracksLatest(t *testing.T) {
 
 	for i := range 3 {
 		tok := []byte(fmt.Sprintf("token-%d", i))
-		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("id-%d", i)), tok); err != nil {
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert(fmt.Sprintf("id-%d", i))}, tok); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -288,10 +320,111 @@ func TestBatchFlushErrorPropagated(t *testing.T) {
 	b := New(context.Background(), cfg, spy.fn())
 	defer b.Close(context.Background())
 
-	err := b.Add(context.Background(), smallUpsert("a"), []byte("tok"))
+	err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok"))
 	if !errors.Is(err, flushErr) {
 		t.Errorf("expected flush error, got %v", err)
 	}
+}
+
+func TestBatchEmptyAddReturnsFlushError(t *testing.T) {
+	// A failed timer flush has no caller, so the next Add reports it and
+	// consumeStream stops. That Add may carry an event that needs no write.
+	// A count-triggered flush fails here instead, so the error is recorded
+	// before Add returns; Add checks it the same way whichever flush failed.
+	flushErr := errors.New("write failed")
+	spy := &flushSpy{err: flushErr}
+	b := New(context.Background(), testConfig(1, 60000), spy.fn())
+	defer b.Close(context.Background())
+
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok-a")); !errors.Is(err, flushErr) {
+		t.Fatalf("Add(a) = %v, want the flush error", err)
+	}
+
+	if err := b.Add(context.Background(), nil, []byte("tok-noop")); !errors.Is(err, flushErr) {
+		t.Errorf("Add(no actions) = %v, want the flush error", err)
+	}
+}
+
+func TestBatchTimerFlushFailureDoesNotLoseActions(t *testing.T) {
+	// A failed timer flush has no caller to return its error to. If the batcher
+	// drops the batch and carries on, the next successful flush saves a later
+	// resume token, and a restart never replays the dropped events.
+	ctx := context.Background()
+	failed := make(chan struct{})
+
+	var mu sync.Mutex
+	calls := 0
+	delivered := map[string]bool{} // document IDs from successful flushes
+	var savedTokens []string       // resume tokens from successful flushes
+
+	b := New(ctx, testConfig(9999, 20), func(_ context.Context, actions []transform.Action, resumeToken []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			close(failed)
+			return errors.New("write failed")
+		}
+		for _, a := range actions {
+			delivered[a.DocumentID] = true
+		}
+		savedTokens = append(savedTokens, string(resumeToken))
+		return nil
+	})
+	defer b.Close(ctx)
+
+	if err := b.Add(ctx, []transform.Action{smallUpsert("a")}, []byte("tok-a")); err != nil {
+		t.Fatalf("Add(a): %v", err)
+	}
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer flush did not fire")
+	}
+
+	addErr := b.Add(ctx, []transform.Action{smallUpsert("b")}, []byte("tok-b"))
+	flushErr := b.Flush(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if slices.Contains(savedTokens, "tok-b") && !delivered["a"] {
+		t.Errorf("saved resume token %q without delivering %q from the failed timer flush", "tok-b", "a")
+	}
+	if !delivered["a"] && addErr == nil && flushErr == nil {
+		t.Error("failed timer flush was neither retried nor reported by a later Add or Flush")
+	}
+}
+
+func TestBatchTimerLeavesBatchForCloseAfterCancel(t *testing.T) {
+	// At shutdown the run context is cancelled before Close makes its final
+	// flush. A timer that fires in between must not drain the batch: its flush
+	// would fail on the cancelled context, Close would find nothing left to
+	// flush, and the batch's resume token would never be saved.
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var saved []string // read only after Close, once flushLoop has exited
+		b := New(ctx, testConfig(9999, 50), func(ctx context.Context, _ []transform.Action, resumeToken []byte) error {
+			// Like a real write, fail on a cancelled context.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			saved = append(saved, string(resumeToken))
+			return nil
+		})
+
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok")); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		time.Sleep(time.Second) // well past the flush interval
+
+		if err := b.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !slices.Equal(saved, []string{"tok"}) {
+			t.Errorf("saved resume tokens %q, want %q", saved, []string{"tok"})
+		}
+	})
 }
 
 func TestBatchReusableAfterFlush(t *testing.T) {
@@ -303,7 +436,7 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 
 	// First batch: 2 actions → auto flush.
 	for i := range 2 {
-		if err := b.Add(context.Background(), smallUpsert(fmt.Sprintf("a-%d", i)), []byte("t1")); err != nil {
+		if err := b.Add(context.Background(), []transform.Action{smallUpsert(fmt.Sprintf("a-%d", i))}, []byte("t1")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -315,7 +448,7 @@ func TestBatchReusableAfterFlush(t *testing.T) {
 	}
 
 	// Second batch: 1 action, manual flush.
-	if err := b.Add(context.Background(), smallUpsert("b-0"), []byte("t2")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("b-0")}, []byte("t2")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Flush(context.Background()); err != nil {
@@ -361,7 +494,7 @@ func TestConcurrentFlushSerialized(t *testing.T) {
 	defer b.Close(context.Background())
 
 	// Add one event — starts the 1ms timer.
-	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok-old")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok-old")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -370,7 +503,7 @@ func TestConcurrentFlushSerialized(t *testing.T) {
 
 	// Add a second event — hits count=2 threshold, triggering a
 	// synchronous flush from the Add goroutine.
-	if err := b.Add(context.Background(), smallUpsert("b"), []byte("tok-new")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("b")}, []byte("tok-new")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -387,7 +520,7 @@ func TestCloseFlushesRemaining(t *testing.T) {
 	cfg := testConfig(9999, 60000)
 	b := New(context.Background(), cfg, spy.fn())
 
-	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,7 +545,7 @@ func TestCloseThenAddReturnsError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := b.Add(context.Background(), smallUpsert("a"), []byte("tok"))
+	err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok"))
 	if err == nil {
 		t.Fatal("expected error from Add after Close")
 	}
@@ -446,7 +579,7 @@ func TestCloseWaitsForInflightFlush(t *testing.T) {
 	})
 
 	// Add an event — starts the 1ms timer.
-	if err := b.Add(context.Background(), smallUpsert("a"), []byte("tok")); err != nil {
+	if err := b.Add(context.Background(), []transform.Action{smallUpsert("a")}, []byte("tok")); err != nil {
 		t.Fatal(err)
 	}
 

@@ -10,11 +10,12 @@ import (
 )
 
 type changeStreamEvent struct {
-	OperationType     string             `bson:"operationType"`
-	DocumentKey       bson.M             `bson:"documentKey"`
-	FullDocument      bson.M             `bson:"fullDocument"`
-	UpdateDescription *updateDescription `bson:"updateDescription"`
-	ClusterTime       bson.Timestamp     `bson:"clusterTime"`
+	OperationType            string             `bson:"operationType"`
+	DocumentKey              bson.M             `bson:"documentKey"`
+	FullDocument             bson.M             `bson:"fullDocument"`
+	FullDocumentBeforeChange bson.M             `bson:"fullDocumentBeforeChange"`
+	UpdateDescription        *updateDescription `bson:"updateDescription"`
+	ClusterTime              bson.Timestamp     `bson:"clusterTime"`
 }
 
 type updateDescription struct {
@@ -22,7 +23,7 @@ type updateDescription struct {
 	RemovedFields []string `bson:"removedFields"`
 }
 
-// LiveChangeStream wraps the driver's ChangeStream and satisfies ChangeStreamIterator.
+// LiveChangeStream wraps the driver's ChangeStream and satisfies cmd.changeStream.
 type LiveChangeStream struct {
 	cs      *mongo.ChangeStream
 	current ChangeEvent
@@ -31,13 +32,15 @@ type LiveChangeStream struct {
 
 // OpenChangeStream opens a change stream on the given collection.
 // If resumeToken is non-nil, the stream resumes from that token.
-func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte) (*LiveChangeStream, error) {
-	opts := options.ChangeStream().
-		SetFullDocument(options.UpdateLookup)
-
-	if resumeToken != nil {
-		opts.SetResumeAfter(bson.Raw(resumeToken))
-	}
+// Insert and replace events always carry fullDocument. If prePostImages is
+// true, update events also carry fullDocument, the post-image, and update,
+// replace and delete events carry fullDocumentBeforeChange, the pre-image.
+// Both are the document as of the event, and are present only when the
+// collection has changeStreamPreAndPostImages enabled and the image has not
+// expired. If prePostImages is false, update and delete events carry neither
+// image and replace events carry only fullDocument.
+func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
+	opts := changeStreamOptions(resumeToken, prePostImages)
 
 	cs, err := db.Collection(collection).Watch(ctx, mongo.Pipeline{}, opts)
 	if err != nil {
@@ -47,7 +50,32 @@ func OpenChangeStream(ctx context.Context, db *mongo.Database, collection string
 	return &LiveChangeStream{cs: cs}, nil
 }
 
+// changeStreamOptions never requests updateLookup, which reads the document
+// when the event is delivered rather than as of the event. Its fullDocument
+// can be several writes newer than the pre-image, or null if the document has
+// since been deleted.
+func changeStreamOptions(resumeToken []byte, prePostImages bool) *options.ChangeStreamOptionsBuilder {
+	opts := options.ChangeStream()
+
+	if prePostImages {
+		opts.SetFullDocument(options.WhenAvailable).
+			SetFullDocumentBeforeChange(options.WhenAvailable)
+	}
+
+	if resumeToken != nil {
+		opts.SetResumeAfter(bson.Raw(resumeToken))
+	}
+
+	return opts
+}
+
 func (l *LiveChangeStream) Next(ctx context.Context) bool {
+	// The driver's error is sticky but a decode error is not: another call
+	// to cs.Next would move past the event that failed to decode.
+	if l.err != nil {
+		return false
+	}
+
 	if !l.cs.Next(ctx) {
 		l.err = l.cs.Err()
 		return false
@@ -69,6 +97,10 @@ func (l *LiveChangeStream) Next(ctx context.Context) bool {
 		l.current.FullDocument = anyMap(raw.FullDocument)
 	}
 
+	if raw.FullDocumentBeforeChange != nil {
+		l.current.FullDocumentBeforeChange = anyMap(raw.FullDocumentBeforeChange)
+	}
+
 	if raw.UpdateDescription != nil {
 		if raw.UpdateDescription.UpdatedFields != nil {
 			l.current.UpdatedFields = anyMap(raw.UpdateDescription.UpdatedFields)
@@ -76,12 +108,16 @@ func (l *LiveChangeStream) Next(ctx context.Context) bool {
 		l.current.RemovedFields = raw.UpdateDescription.RemovedFields
 	}
 
-	l.err = nil
 	return true
 }
 
-func (l *LiveChangeStream) Event() (ChangeEvent, error) {
-	return l.current, l.err
+func (l *LiveChangeStream) Event() ChangeEvent {
+	return l.current
+}
+
+// Err returns the error from the last Next call, if any.
+func (l *LiveChangeStream) Err() error {
+	return l.err
 }
 
 func (l *LiveChangeStream) ResumeToken() []byte {

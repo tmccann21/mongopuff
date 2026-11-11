@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,7 +13,7 @@ func TestValidate_Minimal(t *testing.T) {
 			{
 				Name: "orders",
 				Mapping: MappingConfig{
-					Namespace: "orders",
+					Namespace: MustParseNamespace("orders"),
 					Fields:    []FieldMapping{{Name: "total", Type: FieldTypeString}},
 				},
 			},
@@ -29,7 +31,7 @@ func TestValidate_CustomNamespace(t *testing.T) {
 			{
 				Name: "orders",
 				Mapping: MappingConfig{
-					Namespace: "order_data",
+					Namespace: MustParseNamespace("order_data"),
 					Fields:    []FieldMapping{{Name: "total", Type: FieldTypeString}},
 				},
 			},
@@ -40,8 +42,8 @@ func TestValidate_CustomNamespace(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.Collections[0].Mapping.Namespace != "order_data" {
-		t.Errorf("got namespace %q, want %q", cfg.Collections[0].Mapping.Namespace, "order_data")
+	if got := cfg.Collections[0].Mapping.Namespace.String(); got != "order_data" {
+		t.Errorf("got namespace %q, want %q", got, "order_data")
 	}
 }
 
@@ -51,7 +53,7 @@ func TestValidate_AllFieldTypes(t *testing.T) {
 			{
 				Name: "everything",
 				Mapping: MappingConfig{
-					Namespace: "everything",
+					Namespace: MustParseNamespace("everything"),
 					Fields: []FieldMapping{
 						{Name: "f_string", Type: FieldTypeString},
 						{Name: "f_int", Type: FieldTypeInt},
@@ -85,14 +87,14 @@ func TestValidate_DuplicateNamespace(t *testing.T) {
 			{
 				Name: "users_v1",
 				Mapping: MappingConfig{
-					Namespace: "users",
+					Namespace: MustParseNamespace("users"),
 					Fields:    []FieldMapping{{Name: "name", Type: FieldTypeString}},
 				},
 			},
 			{
 				Name: "users_v2",
 				Mapping: MappingConfig{
-					Namespace: "users",
+					Namespace: MustParseNamespace("users"),
 					Fields:    []FieldMapping{{Name: "name", Type: FieldTypeString}},
 				},
 			},
@@ -135,7 +137,7 @@ func TestValidate_UnknownFieldType(t *testing.T) {
 			{
 				Name: "products",
 				Mapping: MappingConfig{
-					Namespace: "products",
+					Namespace: MustParseNamespace("products"),
 					Fields:    []FieldMapping{{Name: "meta", Type: "map"}},
 				},
 			},
@@ -160,7 +162,7 @@ func TestValidate_VectorMissingDimension(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Precision: VectorPrecisionF32},
 					},
@@ -184,7 +186,7 @@ func TestValidate_VectorMissingPrecision(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Dimension: 128},
 					},
@@ -208,7 +210,7 @@ func TestValidate_VectorBadPrecision(t *testing.T) {
 			{
 				Name: "docs",
 				Mapping: MappingConfig{
-					Namespace: "docs",
+					Namespace: MustParseNamespace("docs"),
 					Fields: []FieldMapping{
 						{Name: "embedding", Type: FieldTypeVector, Dimension: 128, Precision: "f64"},
 					},
@@ -247,5 +249,68 @@ func TestValidate_GlobalOverrides(t *testing.T) {
 	}
 	if eff.BatchFlushTimeMs != DefaultBatchFlushTimeMs {
 		t.Errorf("got flush time %d, want %d (default)", eff.BatchFlushTimeMs, DefaultBatchFlushTimeMs)
+	}
+}
+
+// writeConfigFile writes data to a config file in a new temporary directory
+// and returns its path.
+func writeConfigFile(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mongopuff.yaml")
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The loader fills in the default, so a config without a namespace passes
+// Validate. Moving the loader once dropped it without a failing test.
+func TestLoadConfigFile_NamespaceDefaultsToCollectionName(t *testing.T) {
+	path := writeConfigFile(t, `
+collections:
+  - name: orders
+    mapping:
+      fields:
+        - name: total
+          type: float
+  - name: users
+    mapping:
+      namespace: user_data
+      fields:
+        - name: email
+          type: string
+`)
+
+	collections, _, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+
+	want := map[string]string{"orders": "orders", "users": "user_data"}
+	for _, c := range collections {
+		if got := c.Mapping.Namespace.String(); got != want[c.Name] {
+			t.Errorf("collection %q: got namespace %q, want %q", c.Name, got, want[c.Name])
+		}
+	}
+}
+
+// MongoDB allows collection names that turbopuffer rejects as namespaces. The
+// default must fail at load like a configured name, not on every write.
+func TestLoadConfigFile_InvalidDefaultNamespaceFails(t *testing.T) {
+	path := writeConfigFile(t, `
+collections:
+  - name: my orders
+    mapping:
+      fields:
+        - name: total
+          type: float
+`)
+
+	_, _, err := LoadConfigFile(path)
+	if err == nil {
+		t.Fatal("expected an error for a collection name that is not a valid namespace")
+	}
+	if !strings.Contains(err.Error(), `"my orders"`) {
+		t.Errorf("error %q should name the collection", err)
 	}
 }

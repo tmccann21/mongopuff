@@ -10,9 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/tmccann21/mongopuff/internal/writer"
-	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	"github.com/tmccann21/mongopuff/internal/mongo"
 	"github.com/tmccann21/mongopuff/internal/transform"
+	"github.com/tmccann21/mongopuff/internal/turbopuffer"
+	"github.com/tmccann21/mongopuff/internal/writer"
 )
 
 func runBackfill() error {
@@ -41,22 +42,37 @@ func runBackfill() error {
 	}
 
 	dlqWriter := store.NewDLQWriter()
-	w := writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, cfg.TurbopufferRegion), dlqWriter)
+	p := &collectionPipeline{
+		coll:   collCfg,
+		schema: turbopuffer.BuildSchema(collCfg.Mapping.Fields),
+		writer: writer.New(turbopuffer.New(cfg.TurbopufferAPIKey, cfg.TurbopufferRegion), dlqWriter),
+		dlq:    dlqWriter,
+		store:  store,
+	}
+	return p.backfill(ctx)
+}
 
-	schema := turbopuffer.BuildSchema(collCfg.Mapping.Fields)
-
-	slog.Info("starting backfill", "collection", collCfg.Name)
-	scanner := store.CollectionScanner(collCfg.Name)
-	state, err := store.LoadCollectionState(ctx, collCfg.Name)
+// backfill scans the collection in _id order, one page at a time, and upserts
+// each page into turbopuffer. It saves the last _id of each page as a cursor,
+// so a stopped or crashed backfill resumes where it left off, and stops at the
+// first empty page. Page size comes from config.
+//
+// Each page is stamped with the cluster time read just before it is scanned.
+// Upserts only replace an older cluster time, so a CDC event that changes a
+// document during the backfill wins over the page's earlier copy.
+func (p *collectionPipeline) backfill(ctx context.Context) error {
+	slog.Info("starting backfill", "collection", p.coll.Name)
+	scanner := p.store.CollectionScanner(p.coll.Name)
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 	lastID := state.BackfillCursor
-	pageSize := collCfg.EffectiveBackfillPageSize()
+	pageSize := p.coll.EffectiveBackfillPageSize()
 	page := 0
 	for {
 		page++
-		opTime, err := store.PingOperationTime(ctx)
+		opTime, err := p.store.PingOperationTime(ctx)
 		if err != nil {
 			return fmt.Errorf("ping operation time: %w", err)
 		}
@@ -67,36 +83,58 @@ func runBackfill() error {
 		}
 
 		if len(docs) == 0 {
-			slog.Info("backfill complete", "collection", collCfg.Name, "pages", page-1)
+			slog.Info("backfill complete", "collection", p.coll.Name, "pages", page-1)
 			break
 		}
 
 		slog.Info("scanned page",
-			"collection", collCfg.Name,
+			"collection", p.coll.Name,
 			"page", page,
 			"pageSize", pageSize,
 			"docs", len(docs),
 			"cursor", lastID,
 		)
-		actions := make([]transform.Action, 0, len(docs))
-		for _, doc := range docs {
-			action, err := transform.MapDocument(doc, opTime, collCfg)
-			if err != nil {
-				return fmt.Errorf("map document: %w", err)
-			}
-			actions = append(actions, action)
-		}
-
-		if err := w.WriteBatch(ctx, collCfg.Mapping.Namespace, schema, actions); err != nil {
-			return fmt.Errorf("write batch: %w", err)
+		if err := p.backfillPage(ctx, docs, opTime); err != nil {
+			return err
 		}
 		lastID = docs[len(docs)-1]["_id"]
 
-		if err := store.SaveBackfillCursor(ctx, collCfg.Name, lastID); err != nil {
+		if err := p.store.SaveBackfillCursor(ctx, p.coll.Name, lastID); err != nil {
 			return fmt.Errorf("saving backfill cursor: %w", err)
 		}
-		slog.Info("page written", "collection", collCfg.Name, "page", page, "cursor", lastID)
+		slog.Info("page written", "collection", p.coll.Name, "page", page, "cursor", lastID)
 	}
 
+	return nil
+}
+
+// backfillPage maps one scanned page to upserts stamped with opTime and writes
+// them with one turbopuffer call per resolved namespace. A document that fails
+// to transform is DLQ'd and the rest of the page is still written. The caller
+// saves the backfill cursor only on a nil return.
+//
+// Failed documents are DLQ'd before anything is written to turbopuffer, so an
+// unavailable DLQ fails the page without spending writes on it.
+func (p *collectionPipeline) backfillPage(ctx context.Context, docs []map[string]any, opTime uint64) error {
+	actions := make([]transform.Action, 0, len(docs))
+	var failed []mongo.DLQEntry
+	for _, doc := range docs {
+		action, err := transform.MapDocument(doc, opTime, p.coll)
+		if err != nil {
+			slog.Error("transform error", "collection", p.coll.Name, "documentId", doc["_id"], "error", err)
+			// action is zero on error; OpInsert matches what MapDocument stamps on success.
+			failed = append(failed, transformFailureEntry(p.coll.Name, doc["_id"], mongo.OpInsert, opTime, err))
+			continue
+		}
+		actions = append(actions, action)
+	}
+
+	if err := p.dlq.Write(ctx, failed...); err != nil {
+		return fmt.Errorf("DLQ write for %d documents: %w", len(failed), err)
+	}
+
+	if err := p.writer.WriteBatch(ctx, p.coll.Name, p.schema, actions); err != nil {
+		return fmt.Errorf("write batch: %w", err)
+	}
 	return nil
 }

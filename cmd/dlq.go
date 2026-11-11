@@ -23,7 +23,7 @@ func runDLQ() error {
 
 	connStr := os.Getenv("MONGODB_CONNECTION_STRING")
 	if connStr == "" {
-		return fmt.Errorf("MONGODB_CONNECTION_STRING is required")
+		return errors.New("MONGODB_CONNECTION_STRING is required")
 	}
 
 	store, err := mongo.NewStore(ctx, connStr)
@@ -67,13 +67,15 @@ func runDLQList(ctx context.Context, store *mongo.Store) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tCOLLECTION\tDOCUMENT\tOPERATION\tERROR KIND\tCREATED")
+	fmt.Fprintln(w, "ID\tCOLLECTION\tNAMESPACE\tDOCUMENT\tOPERATION\tACTION\tERROR KIND\tCREATED")
 	for _, e := range entries {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			e.ID.Hex(),
 			e.Collection,
+			orDash(e.Namespace),
 			truncate(e.DocumentID, 24),
 			e.Operation,
+			orDash(string(e.ActionType)),
 			e.ErrorKind,
 			e.CreatedAt.Format("2006-01-02 15:04:05"),
 		)
@@ -106,8 +108,10 @@ func runDLQShow(ctx context.Context, store *mongo.Store) error {
 	fmt.Printf("DLQ Entry %s\n", entry.ID.Hex())
 	fmt.Println("────────────────────────────────────────")
 	fmt.Printf("Collection:   %s\n", entry.Collection)
+	fmt.Printf("Namespace:    %s\n", orDash(entry.Namespace))
 	fmt.Printf("Document ID:  %s\n", entry.DocumentID)
 	fmt.Printf("Operation:    %s\n", entry.Operation)
+	fmt.Printf("Action Type:  %s\n", orDash(string(entry.ActionType)))
 	fmt.Printf("Error Kind:   %s\n", entry.ErrorKind)
 	fmt.Printf("Cluster Time: %d\n", entry.ClusterTime)
 	fmt.Printf("Created:      %s\n", entry.CreatedAt.Format("2006-01-02 15:04:05 MST"))
@@ -147,6 +151,13 @@ func runDLQClear(ctx context.Context, store *mongo.Store) error {
 		fmt.Printf("Cleared %d DLQ entries.\n", count)
 	}
 	return nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func truncate(s string, max int) string {

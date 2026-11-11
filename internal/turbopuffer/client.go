@@ -38,8 +38,8 @@ func BuildSchema(fields []config.FieldMapping) map[string]turbopuffer.AttributeS
 		}
 		if field.Embed != nil {
 			entry.Embed = turbopuffer.AttributeEmbedConfigParam{
-				Model: field.Embed.Model,
-				Dims:  param.NewOpt(int64(field.Embed.Dimensions)),
+				Model:     field.Embed.Model,
+				Dims:      param.NewOpt(int64(field.Embed.Dimensions)),
 				Attribute: param.NewOpt(field.Embed.Attribute),
 			}
 		}

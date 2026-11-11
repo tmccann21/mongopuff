@@ -2,6 +2,7 @@ package transform
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -19,24 +20,47 @@ const (
 	ActionUpsert ActionType = iota
 	ActionPatch
 	ActionDelete
-	ActionSkip
 )
+
+// String returns the string representation of the ActionType.
+func (t ActionType) String() string {
+	switch t {
+	case ActionUpsert:
+		return "upsert"
+	case ActionPatch:
+		return "patch"
+	case ActionDelete:
+		return "delete"
+	default:
+		return "ActionType(" + strconv.Itoa(int(t)) + ")"
+	}
+}
 
 // Action is what gets sent to turbopuffer after transforming a change event.
 type Action struct {
 	Type        ActionType
 	Operation   mongo.Operation // original MongoDB operation (insert, update, replace, delete)
+	Namespace   string
 	DocumentID  string
 	Attributes  map[string]any // field name → value
 	ClusterTime uint64
 }
+
+var (
+	// ErrInvalidID is returned when a BSON _id value is not supported.
+	ErrInvalidID = errors.New("invalid _id")
+	// ErrNamespaceUnresolved is returned when a dynamic namespace cannot be resolved.
+	ErrNamespaceUnresolved = errors.New("namespace unresolved")
+	// ErrTypeMismatch is returned when a BSON value cannot be coerced to the expected type.
+	ErrTypeMismatch = errors.New("type mismatch")
+)
 
 // SerializeID converts a BSON _id value to a string for use as a turbopuffer document ID.
 // Supported types: ObjectID, string, int32, int64, Binary with UUID subtype.
 // All other types are rejected.
 func SerializeID(id any) (string, error) {
 	if id == nil {
-		return "", fmt.Errorf("_id is nil")
+		return "", fmt.Errorf("%w: nil", ErrInvalidID)
 	}
 
 	switch v := id.(type) {
@@ -49,15 +73,13 @@ func SerializeID(id any) (string, error) {
 	case int64:
 		return strconv.FormatInt(v, 10), nil
 	case bson.Binary:
-		if v.Subtype != bson.TypeBinaryUUID {
-			return "", fmt.Errorf("unsupported _id binary subtype: 0x%02x", v.Subtype)
+		s, err := uuidString(v)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidID, err)
 		}
-		if len(v.Data) != 16 {
-			return "", fmt.Errorf("UUID binary _id has invalid length %d, expected 16", len(v.Data))
-		}
-		return formatUUID(v.Data), nil
+		return s, nil
 	default:
-		return "", fmt.Errorf("unsupported _id type: %T", id)
+		return "", fmt.Errorf("%w: unsupported type %T", ErrInvalidID, id)
 	}
 }
 
@@ -75,27 +97,36 @@ func SerializeClusterTime(t uint32, i uint32) uint64 {
 	return uint64(t)<<32 | uint64(i)
 }
 
-// MapChangeEvent converts a change stream event into a turbopuffer Action
-// according to the collection's field mapping config.
-func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+// MapChangeEvent converts a change stream event into the turbopuffer Actions
+// it requires, according to the collection's field mapping config. An event
+// that needs no write produces no Actions, a namespace transition produces a
+// delete from the old namespace followed by an upsert into the new one, and
+// every other event produces one Action.
+func MapChangeEvent(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	switch event.Operation {
-	case mongo.OpInsert, mongo.OpReplace:
-		return mapUpsert(event, coll)
+	case mongo.OpInsert:
+		return mapInsert(event, coll)
+	case mongo.OpReplace:
+		return mapReplace(event, coll)
 	case mongo.OpUpdate:
-		return mapPatch(event, coll)
+		return mapUpdate(event, coll)
 	case mongo.OpDelete:
 		return mapDelete(event, coll)
 	case mongo.OpInvalidate:
-		return Action{}, fmt.Errorf("change stream invalidated: resume token is no longer valid, re-backfill required")
-	case mongo.OpRename, mongo.OpDrop:
-		return Action{Type: ActionSkip}, nil
+		return nil, errors.New("change stream invalidated: resume token is no longer valid, re-backfill required")
 	default:
-		return Action{Type: ActionSkip}, nil
+		// Rename, drop, and any operation not handled above need no write.
+		return nil, nil
 	}
 }
 
 func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionConfig) (Action, error) {
 	docID, err := SerializeID(doc["_id"])
+	if err != nil {
+		return Action{}, err
+	}
+
+	ns, err := resolveNamespace(coll.Mapping.Namespace, doc)
 	if err != nil {
 		return Action{}, err
 	}
@@ -108,13 +139,27 @@ func MapDocument(doc map[string]any, clusterTime uint64, coll config.CollectionC
 	return Action{
 		Type:        ActionUpsert,
 		Operation:   mongo.OpInsert,
+		Namespace:   ns,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: clusterTime,
 	}, nil
 }
 
-func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+func mapInsert(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocument)
+	if err != nil {
+		return nil, err
+	}
+	ups, err := mapUpsert(event, coll, ns)
+	if err != nil {
+		return nil, err
+	}
+	return []Action{ups}, nil
+}
+
+// mapUpsert builds the upsert that writes event's full document into ns.
+func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig, ns string) (Action, error) {
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
 		return Action{}, err
@@ -127,6 +172,7 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 
 	return Action{
 		Type:        ActionUpsert,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
@@ -134,15 +180,101 @@ func mapUpsert(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, e
 	}, nil
 }
 
-func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+// mapReplace handles OpReplace. The document is written in full to the
+// namespace its post-image resolves to, and deleted from the namespace its
+// pre-image resolves to when that differs.
+func mapReplace(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	move, err := resolveMove(event, coll.Mapping.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	return mapMove(event, coll, move)
+}
+
+// mapUpdate handles OpUpdate. A document that stays in its namespace is
+// patched with its changed mapped fields. One that moved, or whose earlier
+// write went to the DLQ, is written in full by mapMove.
+func mapUpdate(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
+	move, err := resolveMove(event, coll.Mapping.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	if move.stayed() {
+		return mapPatch(event, coll, move.to)
+	}
+	return mapMove(event, coll, move)
+}
+
+// namespaceMove is where an update or replace leaves the document: out of
+// the namespace its pre-image resolves to, into the one its post-image
+// resolves to. For a static namespace both are the configured name.
+type namespaceMove struct {
+	from, to string
+	// fromKnown is false when the pre-image is present but its namespace
+	// cannot be resolved. The document's earlier write went to the DLQ, so
+	// turbopuffer may hold no copy of it: the post-image is written in full,
+	// since turbopuffer ignores a patch to a document it does not have, and
+	// nothing is deleted.
+	fromKnown bool
+}
+
+// stayed reports whether the document is still in the namespace it was in.
+func (m namespaceMove) stayed() bool { return m.fromKnown && m.from == m.to }
+
+// moved reports whether the document left the namespace it was in.
+func (m namespaceMove) moved() bool { return m.fromKnown && m.from != m.to }
+
+// resolveMove resolves the namespaces an update or replace moves the document
+// between. An image the event does not carry is an error, since without it
+// the document cannot be placed, even when none of its mapped fields changed.
+func resolveMove(event mongo.ChangeEvent, ns config.Namespace) (namespaceMove, error) {
+	to, err := resolveNamespace(ns, event.FullDocument)
+	if err != nil {
+		return namespaceMove{}, err
+	}
+	from, err := resolveNamespace(ns, event.FullDocumentBeforeChange)
+	if errors.Is(err, errImageUnavailable) {
+		return namespaceMove{}, err
+	}
+	if err != nil {
+		// The pre-image is present but names no namespace; see fromKnown.
+		return namespaceMove{to: to}, nil
+	}
+	return namespaceMove{from: from, to: to, fromKnown: true}, nil
+}
+
+// mapMove writes the post-image in full to the namespace it resolves to and,
+// when the document moved there from another namespace, deletes it from the
+// old one first.
+func mapMove(event mongo.ChangeEvent, coll config.CollectionConfig, move namespaceMove) ([]Action, error) {
+	ups, err := mapUpsert(event, coll, move.to)
+	if err != nil {
+		return nil, err
+	}
+	if !move.moved() {
+		return []Action{ups}, nil
+	}
+	del := Action{
+		Type:        ActionDelete,
+		Namespace:   move.from,
+		Operation:   event.Operation,
+		DocumentID:  ups.DocumentID,
+		ClusterTime: event.ClusterTime,
+	}
+	return []Action{del, ups}, nil
+}
+
+// mapPatch builds the patch that writes an update's changed mapped fields to
+// ns, or no action when none changed.
+func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig, ns string) ([]Action, error) {
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
 	attrs, err := extractFields(event.UpdatedFields, coll.Mapping.Fields)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
 	// Removed fields are explicitly nulled in turbopuffer.
@@ -156,34 +288,41 @@ func mapPatch(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, er
 	}
 
 	if len(attrs) == 0 {
-		return Action{Type: ActionSkip}, nil
+		return nil, nil
 	}
 
-	return Action{
+	return []Action{{
 		Type:        ActionPatch,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		Attributes:  attrs,
 		ClusterTime: event.ClusterTime,
-	}, nil
+	}}, nil
 }
 
-func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) (Action, error) {
+func mapDelete(event mongo.ChangeEvent, coll config.CollectionConfig) ([]Action, error) {
 	if !coll.MirrorDeletesEnabled() {
-		return Action{Type: ActionSkip}, nil
+		return nil, nil
 	}
 
 	docID, err := SerializeID(event.DocumentID)
 	if err != nil {
-		return Action{}, err
+		return nil, err
 	}
 
-	return Action{
+	ns, err := resolveNamespace(coll.Mapping.Namespace, event.FullDocumentBeforeChange)
+	if err != nil {
+		return nil, err
+	}
+
+	return []Action{{
 		Type:        ActionDelete,
+		Namespace:   ns,
 		Operation:   event.Operation,
 		DocumentID:  docID,
 		ClusterTime: event.ClusterTime,
-	}, nil
+	}}, nil
 }
 
 func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string]any, error) {
@@ -195,7 +334,7 @@ func extractFields(doc map[string]any, fields []config.FieldMapping) (map[string
 		}
 		coerced, err := coerceValue(val, f)
 		if err != nil {
-			return nil, fmt.Errorf("field %q: %w", f.Name, err)
+			return nil, fmt.Errorf("field %q: %w: %w", f.Name, ErrTypeMismatch, err)
 		}
 		attrs[f.Name] = coerced
 	}
@@ -254,11 +393,20 @@ func coerceFloat(val any) (any, error) {
 	case int64:
 		return float64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to float", val)
+		return nil, fmt.Errorf("cannot coerce %T to float", val)
 	}
 }
 
+// coerceInt adapts toInt64 to the signature coerceArray takes.
 func coerceInt(val any) (any, error) {
+	n, err := toInt64(val)
+	if err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func toInt64(val any) (int64, error) {
 	switch v := val.(type) {
 	case int32:
 		return int64(v), nil
@@ -266,11 +414,11 @@ func coerceInt(val any) (any, error) {
 		return v, nil
 	case float64:
 		if v != math.Trunc(v) {
-			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to int", v)
+			return 0, fmt.Errorf("float64 %v has fractional part, cannot coerce to int", v)
 		}
 		return int64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to int", val)
+		return 0, fmt.Errorf("cannot coerce %T to int", val)
 	}
 }
 
@@ -278,58 +426,67 @@ func coerceUint(val any) (any, error) {
 	switch v := val.(type) {
 	case int32:
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %d cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	case int64:
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %d cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %d cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	case float64:
 		if v != math.Trunc(v) {
-			return nil, fmt.Errorf("type mismatch: float64 %v has fractional part, cannot coerce to uint", v)
+			return nil, fmt.Errorf("float64 %v has fractional part, cannot coerce to uint", v)
 		}
 		if v < 0 {
-			return nil, fmt.Errorf("type mismatch: negative value %v cannot be coerced to uint", v)
+			return nil, fmt.Errorf("negative value %v cannot be coerced to uint", v)
 		}
 		return uint64(v), nil
 	default:
-		return nil, fmt.Errorf("type mismatch: cannot coerce %T to uint", val)
+		return nil, fmt.Errorf("cannot coerce %T to uint", val)
 	}
 }
 
 func coerceString(val any) (any, error) {
 	if _, ok := val.(string); !ok {
-		return nil, fmt.Errorf("type mismatch: expected string, got %T", val)
+		return nil, fmt.Errorf("expected string, got %T", val)
 	}
 	return val, nil
 }
 
 func coerceBool(val any) (any, error) {
 	if _, ok := val.(bool); !ok {
-		return nil, fmt.Errorf("type mismatch: expected bool, got %T", val)
+		return nil, fmt.Errorf("expected bool, got %T", val)
 	}
 	return val, nil
 }
 
+// coerceUUID adapts uuidString to the signature coerceArray takes.
 func coerceUUID(val any) (any, error) {
 	v, ok := val.(bson.Binary)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected Binary, got %T", val)
+		return nil, fmt.Errorf("expected Binary, got %T", val)
 	}
-	if v.Subtype != bson.TypeBinaryUUID {
-		return nil, fmt.Errorf("type mismatch: expected UUID binary subtype, got 0x%02x", v.Subtype)
+	s, err := uuidString(v)
+	if err != nil {
+		return nil, err
 	}
-	if len(v.Data) != 16 {
-		return nil, fmt.Errorf("type mismatch: UUID binary has invalid length %d, expected 16", len(v.Data))
+	return s, nil
+}
+
+func uuidString(b bson.Binary) (string, error) {
+	if b.Subtype != bson.TypeBinaryUUID {
+		return "", fmt.Errorf("expected UUID binary subtype, got 0x%02x", b.Subtype)
 	}
-	return formatUUID(v.Data), nil
+	if len(b.Data) != 16 {
+		return "", fmt.Errorf("UUID binary has invalid length %d, expected 16", len(b.Data))
+	}
+	return formatUUID(b.Data), nil
 }
 
 func coerceDatetime(val any) (any, error) {
 	if _, ok := val.(time.Time); !ok {
-		return nil, fmt.Errorf("type mismatch: expected datetime, got %T", val)
+		return nil, fmt.Errorf("expected datetime, got %T", val)
 	}
 	return val, nil
 }
@@ -337,10 +494,10 @@ func coerceDatetime(val any) (any, error) {
 func coerceVector(val any, dimension int) (any, error) {
 	arr, ok := val.(bson.A)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected array for vector, got %T", val)
+		return nil, fmt.Errorf("expected array for vector, got %T", val)
 	}
 	if len(arr) != dimension {
-		return nil, fmt.Errorf("type mismatch: vector dimension %d does not match expected %d", len(arr), dimension)
+		return nil, fmt.Errorf("vector dimension %d does not match expected %d", len(arr), dimension)
 	}
 	result := make([]float32, len(arr))
 	for i, elem := range arr {
@@ -352,7 +509,7 @@ func coerceVector(val any, dimension int) (any, error) {
 		case int64:
 			result[i] = float32(v)
 		default:
-			return nil, fmt.Errorf("element [%d]: type mismatch: expected numeric, got %T", i, elem)
+			return nil, fmt.Errorf("element [%d]: expected numeric, got %T", i, elem)
 		}
 	}
 	return result, nil
@@ -361,7 +518,7 @@ func coerceVector(val any, dimension int) (any, error) {
 func coerceArray(val any, coerceFn func(any) (any, error)) (any, error) {
 	arr, ok := val.(bson.A)
 	if !ok {
-		return nil, fmt.Errorf("type mismatch: expected array, got %T", val)
+		return nil, fmt.Errorf("expected array, got %T", val)
 	}
 	result := make([]any, len(arr))
 	for i, elem := range arr {

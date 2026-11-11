@@ -3,7 +3,10 @@ package writer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -25,12 +28,26 @@ type mockTpuf struct {
 	mu    sync.Mutex
 	calls []writeBatchCall
 	errs  []error // if non-nil, shift and return; otherwise nil
+
+	// hook, if set, runs at the start of every Write without holding mu. Its
+	// error is returned in place of errs. Partition tests use it to fail, block,
+	// or rendezvous specific namespaces, since the order of concurrent partition
+	// writes is nondeterministic.
+	hook func(ctx context.Context, namespace string) error
 }
 
 func (m *mockTpuf) Write(ctx context.Context, namespace string, schema map[string]tpuf.AttributeSchemaConfigParam, actions []transform.Action) error {
+	var hookErr error
+	if m.hook != nil {
+		hookErr = m.hook(ctx, namespace)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, writeBatchCall{namespace: namespace, actions: actions})
+	if hookErr != nil {
+		return hookErr
+	}
 	if len(m.errs) > 0 {
 		err := m.errs[0]
 		m.errs = m.errs[1:]
@@ -55,18 +72,53 @@ func (m *mockTpuf) getCalls() []writeBatchCall {
 
 type noopDLQ struct{}
 
-func (noopDLQ) Write(_ context.Context, _ mongo.DLQEntry) error { return nil }
+func (noopDLQ) Write(context.Context, ...mongo.DLQEntry) error { return nil }
+
+// recordingDLQ records the entries of each Write call. WriteBatch DLQs failed
+// partitions concurrently, so calls are guarded by mu.
+type recordingDLQ struct {
+	mu    sync.Mutex
+	calls [][]mongo.DLQEntry
+	err   error // returned from every Write, after the call is recorded
+}
+
+func (d *recordingDLQ) Write(_ context.Context, entries ...mongo.DLQEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, slices.Clone(entries))
+	return d.err
+}
+
+// getCalls returns the entries of each Write call, in call order.
+func (d *recordingDLQ) getCalls() [][]mongo.DLQEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.calls)
+}
+
+// getEntries returns the entries of every Write call, in call order.
+func (d *recordingDLQ) getEntries() []mongo.DLQEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Concat(d.calls...)
+}
 
 // --- helpers ---
 
-func writeSegment(t *testing.T, sp *spool.Spool, seg uint32, actions []transform.Action) {
+// testCollection is the MongoDB collection the tests' actions come from. It
+// differs from every test namespace, so a DLQ entry that records the namespace
+// as its collection is caught.
+const testCollection = "items"
+
+// writeSegment appends actions to the spool as its next segment.
+func writeSegment(t *testing.T, sp *spool.Spool, actions []transform.Action) {
 	t.Helper()
 	data, err := json.Marshal(actions)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if err := sp.Write(seg, data); err != nil {
-		t.Fatalf("spool.Write(%d): %v", seg, err)
+	if _, err := sp.Append(data); err != nil {
+		t.Fatalf("spool.Append: %v", err)
 	}
 }
 
@@ -75,6 +127,7 @@ func makeActions(docID string) []transform.Action {
 		{
 			Type:        transform.ActionUpsert,
 			Operation:   mongo.OpInsert,
+			Namespace:   "test-ns",
 			DocumentID:  docID,
 			Attributes:  map[string]any{"name": docID},
 			ClusterTime: 1,
@@ -101,11 +154,10 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
-	writeSegment(t, sp, 1, makeActions("doc-1"))
-	writeSegment(t, sp, 2, makeActions("doc-2"))
+	writeSegment(t, sp, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-1"))
+	writeSegment(t, sp, makeActions("doc-2"))
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -117,7 +169,7 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -137,14 +189,7 @@ func TestRunSpoolDelivery_DeliversExistingSegments(t *testing.T) {
 		}
 	}
 
-	// Verify segment files are removed.
-	segs, err := sp.Segments()
-	if err != nil {
-		t.Fatalf("Segments: %v", err)
-	}
-	if len(segs) != 0 {
-		t.Errorf("segments remaining: %v, want none", segs)
-	}
+	assertSegmentsRemoved(t, sp, 0, 1, 2)
 }
 
 func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
@@ -152,7 +197,6 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -164,7 +208,7 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -175,7 +219,7 @@ func TestRunSpoolDelivery_WaitsForSignal(t *testing.T) {
 	}
 
 	// Write a segment and signal.
-	writeSegment(t, sp, 0, makeActions("doc-signal"))
+	writeSegment(t, sp, makeActions("doc-signal"))
 	signal <- struct{}{}
 
 	waitFor(t, func() bool { return mock.callCount() >= 1 }, 2*time.Second)
@@ -196,7 +240,6 @@ func TestRunSpoolDelivery_StopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -206,7 +249,7 @@ func TestRunSpoolDelivery_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -225,15 +268,15 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-fail"))
-	writeSegment(t, sp, 1, makeActions("doc-ok"))
+	writeSegment(t, sp, makeActions("doc-fail"))
+	writeSegment(t, sp, makeActions("doc-ok"))
 
 	mock := &mockTpuf{
-		errs: []error{fmt.Errorf("transient turbopuffer error")},
+		errs: []error{errors.New("transient turbopuffer error")},
 	}
-	w := New(mock, noopDLQ{})
+	dlq := &recordingDLQ{}
+	w := New(mock, dlq)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -242,7 +285,7 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 
@@ -254,14 +297,191 @@ func TestRunSpoolDelivery_ContinuesAfterWriteError(t *testing.T) {
 		t.Fatalf("got %d WriteBatch calls, want 2", mock.callCount())
 	}
 
-	// Both segments should be removed regardless of error.
-	segs, err := sp.Segments()
+	// The failed write went to the DLQ, so segment 0 is handled and removed.
+	if got, want := dlqDocIDs(dlq.getEntries()), []string{"doc-fail"}; !slices.Equal(got, want) {
+		t.Errorf("DLQ doc IDs = %v, want %v", got, want)
+	}
+	assertSegmentsRemoved(t, sp, 0, 1)
+}
+
+// ctxDLQ fails every Write once ctx is done, as the MongoDB driver does.
+type ctxDLQ struct{}
+
+func (ctxDLQ) Write(ctx context.Context, _ ...mongo.DLQEntry) error { return ctx.Err() }
+
+// assertSegmentsOnDisk fails unless every segment in want is still in the spool.
+func assertSegmentsOnDisk(t *testing.T, sp *spool.Spool, want ...uint32) {
+	t.Helper()
+	for _, seg := range want {
+		if _, err := sp.Read(seg); err != nil {
+			t.Errorf("segment %d: %v, want it still on disk", seg, err)
+		}
+	}
+}
+
+// assertSegmentsRemoved fails unless every segment in removed is gone from the
+// spool.
+func assertSegmentsRemoved(t *testing.T, sp *spool.Spool, removed ...uint32) {
+	t.Helper()
+	for _, seg := range removed {
+		if _, err := sp.Read(seg); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("Read(%d) error = %v, want it to wrap os.ErrNotExist", seg, err)
+		}
+	}
+}
+
+// startDelivery runs RunSpoolDelivery in a goroutine and returns a channel that
+// receives its result.
+func startDelivery(ctx context.Context, w *Writer, sp *spool.Spool) <-chan error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.RunSpoolDelivery(ctx, sp, testCollection, nil, make(chan struct{}, 1))
+	}()
+	return errCh
+}
+
+// awaitDelivery waits for RunSpoolDelivery to return and gives its result.
+func awaitDelivery(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunSpoolDelivery did not return")
+		return nil
+	}
+}
+
+// The resume token for a spooled segment is saved when the segment is written,
+// so the segment file is the only copy of its events. Delivery may remove it
+// only once it has been written to turbopuffer or the DLQ. When it cannot,
+// delivery stops with an error and keeps the segment rather than moving on:
+// deletes are unconditional, so delivering a newer delete before an older
+// upsert would let the upsert bring a deleted document back.
+
+func TestRunSpoolDelivery_StopsAtUndeliverableSegment(t *testing.T) {
+	sp, err := spool.Open(t.TempDir())
 	if err != nil {
-		t.Fatalf("Segments: %v", err)
+		t.Fatalf("spool.Open: %v", err)
 	}
-	if len(segs) != 0 {
-		t.Errorf("segments remaining: %v, want none", segs)
+
+	writeSegment(t, sp, makeActions("doc-fail"))
+	writeSegment(t, sp, makeActions("doc-later"))
+
+	mock := &mockTpuf{hook: func(context.Context, string) error {
+		return errors.New("turbopuffer unavailable")
+	}}
+	dlqErr := errors.New("dlq unavailable")
+	w := New(mock, &recordingDLQ{err: dlqErr})
+
+	err = awaitDelivery(t, startDelivery(context.Background(), w, sp))
+	if !errors.Is(err, dlqErr) {
+		t.Errorf("RunSpoolDelivery error = %v, want it to wrap %v", err, dlqErr)
 	}
+
+	assertSegmentsOnDisk(t, sp, 0, 1)
+	for _, call := range mock.getCalls() {
+		if call.actions[0].DocumentID == "doc-later" {
+			t.Error("delivered segment 1 before segment 0 was written or DLQ'd")
+		}
+	}
+}
+
+func TestRunSpoolDelivery_KeepsSegmentOnShutdown(t *testing.T) {
+	// Shutdown cancels ctx while a delivery is in flight, which fails both the
+	// turbopuffer write and the DLQ fallback. That segment must survive for the
+	// next run to deliver, and shutting down is not an error.
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+
+	writeSegment(t, sp, makeActions("doc-0"))
+
+	inFlight := make(chan struct{})
+	var once sync.Once
+	mock := &mockTpuf{hook: func(ctx context.Context, _ string) error {
+		once.Do(func() { close(inFlight) })
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	w := New(mock, ctxDLQ{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := startDelivery(ctx, w, sp)
+
+	select {
+	case <-inFlight:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery never started")
+	}
+	cancel()
+
+	if err := awaitDelivery(t, errCh); err != nil {
+		t.Errorf("RunSpoolDelivery error = %v, want nil on shutdown", err)
+	}
+	assertSegmentsOnDisk(t, sp, 0)
+}
+
+func TestRunSpoolDelivery_StopsAtCorruptSegment(t *testing.T) {
+	// A segment that cannot be decoded cannot be delivered, and skipping it
+	// delivers later segments out of order and strands its events.
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+
+	if _, err := sp.Append([]byte("not json")); err != nil {
+		t.Fatalf("spool.Append: %v", err)
+	}
+	writeSegment(t, sp, makeActions("doc-later"))
+
+	mock := &mockTpuf{}
+	w := New(mock, noopDLQ{})
+
+	if err := awaitDelivery(t, startDelivery(context.Background(), w, sp)); err == nil {
+		t.Error("RunSpoolDelivery returned nil, want an error for corrupt segment 0")
+	}
+	if n := mock.callCount(); n != 0 {
+		t.Errorf("got %d turbopuffer calls, want 0: segment 1 was delivered past corrupt segment 0", n)
+	}
+	assertSegmentsOnDisk(t, sp, 0, 1)
+}
+
+func TestRunSpoolDelivery_StopsWhenRemoveFails(t *testing.T) {
+	// A delivered segment that stays on disk is delivered again on the next
+	// run. If delivery moved on, that redelivery would come after newer
+	// segments.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so Remove cannot be made to fail")
+	}
+
+	dir := t.TempDir()
+	sp, err := spool.Open(dir)
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+
+	writeSegment(t, sp, makeActions("doc-0"))
+
+	// A read-only directory still allows reading segment 0 but not removing it.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) }) // let TempDir cleanup remove it
+
+	mock := &mockTpuf{}
+	w := New(mock, noopDLQ{})
+
+	err = awaitDelivery(t, startDelivery(context.Background(), w, sp))
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("RunSpoolDelivery error = %v, want it to wrap os.ErrPermission", err)
+	}
+	if n := mock.callCount(); n != 1 {
+		t.Errorf("got %d turbopuffer calls, want 1", n)
+	}
+	assertSegmentsOnDisk(t, sp, 0)
 }
 
 func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
@@ -269,11 +489,10 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	defer sp.Close()
 
-	writeSegment(t, sp, 0, makeActions("doc-0"))
-	writeSegment(t, sp, 1, makeActions("doc-1"))
-	writeSegment(t, sp, 2, makeActions("doc-2"))
+	writeSegment(t, sp, makeActions("doc-0"))
+	writeSegment(t, sp, makeActions("doc-1"))
+	writeSegment(t, sp, makeActions("doc-2"))
 
 	mock := &mockTpuf{}
 	w := New(mock, noopDLQ{})
@@ -287,7 +506,7 @@ func TestRunSpoolDelivery_MultipleSegmentsBeforeSignal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		w.RunSpoolDelivery(ctx, sp, "test-ns", nil, 0, signal)
+		w.RunSpoolDelivery(ctx, sp, testCollection, nil, signal)
 		close(done)
 	}()
 

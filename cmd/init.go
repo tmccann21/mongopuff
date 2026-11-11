@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -68,7 +69,7 @@ type fieldPrompt struct {
 
 type collectionPrompt struct {
 	name          string
-	namespace     string
+	namespace     config.Namespace
 	mirrorDeletes bool
 	fields        []fieldPrompt
 }
@@ -84,7 +85,7 @@ var validTypes = map[string]bool{
 func promptField() (fieldPrompt, error) {
 	name := prompt("  Field name: ")
 	if name == "" {
-		return fieldPrompt{}, fmt.Errorf("field name is required")
+		return fieldPrompt{}, errors.New("field name is required")
 	}
 
 	var fieldType string
@@ -143,10 +144,18 @@ func promptField() (fieldPrompt, error) {
 func promptCollection() (collectionPrompt, error) {
 	name := prompt("Collection name: ")
 	if name == "" {
-		return collectionPrompt{}, fmt.Errorf("collection name is required")
+		return collectionPrompt{}, errors.New("collection name is required")
 	}
 
-	namespace := promptDefault("Turbopuffer namespace", name)
+	var namespace config.Namespace
+	for {
+		ns, err := config.ParseNamespace(promptDefault("Turbopuffer namespace", name))
+		if err == nil {
+			namespace = ns
+			break
+		}
+		fmt.Printf("Invalid %v\n", err)
+	}
 	mirrorDeletes := promptYesNo("Mirror deletes?", true)
 
 	fmt.Println("Add fields:")

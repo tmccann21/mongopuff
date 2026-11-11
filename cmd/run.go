@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,6 +23,7 @@ import (
 	"github.com/tmccann21/mongopuff/internal/writer"
 
 	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
+	"golang.org/x/sync/errgroup"
 )
 
 func runCDC() error {
@@ -34,6 +35,17 @@ func runCDC() error {
 		return err
 	}
 	defer store.Close(context.Background())
+
+	if err := checkPreImages(ctx, store, cfg.Collections); err != nil {
+		return fmt.Errorf("pre-image check: %w", err)
+	}
+
+	if timeout := cfg.Global.ShutdownTimeout(); timeout > shutdownTimeoutWarnAbove {
+		slog.Warn("shutdown timeout exceeds Kubernetes' default grace period; the process may be killed before its final flush finishes",
+			"shutdownTimeout", timeout,
+			"gracePeriod", shutdownTimeoutWarnAbove,
+		)
+	}
 
 	slog.Info("starting mongopuff CDC",
 		"collections", len(cfg.Collections),
@@ -61,14 +73,21 @@ func runCDC() error {
 	// Spawn a goroutine per collection.
 	var wg sync.WaitGroup
 	for _, coll := range cfg.Collections {
+		p := &collectionPipeline{
+			coll:   coll,
+			schema: turbopuffer.BuildSchema(coll.Mapping.Fields),
+			writer: w,
+			dlq:    dlqWriter,
+			store:  store,
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			var err error
 			if cfg.Global.SpoolEnabled {
-				err = runCollectionCDCSpooled(ctx, cfg, store, w, dlqWriter, coll, status)
+				err = p.runCDCSpooled(ctx, cfg.Global)
 			} else {
-				err = runCollectionCDCDirect(ctx, cfg, store, w, dlqWriter, coll, status)
+				err = p.runCDCDirect(ctx, cfg.Global, status)
 			}
 			if err != nil {
 				slog.Error("collection CDC stopped", "collection", coll.Name, "error", err)
@@ -84,13 +103,28 @@ func runCDC() error {
 	return nil
 }
 
-func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
+// shutdownTimeoutWarnAbove is Kubernetes' default termination grace period,
+// after which a pod that has not exited is killed.
+const shutdownTimeoutWarnAbove = 30 * time.Second
+
+// errRebackfillRequired means the change stream cannot be resumed, so the
+// saved resume token is useless and the collection must be re-backfilled.
+var errRebackfillRequired = errors.New("oplog position lost (re-backfill required)")
+
+// changeStream is the part of *mongo.LiveChangeStream that consumeStream uses.
+type changeStream interface {
+	Next(ctx context.Context) bool
+	Event() mongo.ChangeEvent
+	Err() error
+	ResumeToken() []byte
+}
+
+// consumeStream adds each event's actions to batcher until the stream ends.
+// It leaves the last events in batcher: the caller flushes them by closing it
+// with closeBatcher, since at shutdown ctx is already cancelled.
+func consumeStream(ctx context.Context, stream changeStream, batcher *batch.Batcher, coll config.CollectionConfig, dlqWriter mongo.DLQWriter) error {
 	for stream.Next(ctx) {
-		event, err := stream.Event()
-		if err != nil {
-			slog.Error("change stream event error", "collection", coll.Name, "error", err)
-			continue
-		}
+		event := stream.Event()
 
 		slog.Debug("change event",
 			"collection", coll.Name,
@@ -100,74 +134,106 @@ func consumeStream(ctx context.Context, stream *mongo.LiveChangeStream, batcher 
 			"clockTime", time.Now(),
 		)
 
-		action, err := transform.MapChangeEvent(event, coll)
+		actions, err := transform.MapChangeEvent(event, coll)
 		if err != nil {
 			slog.Error("transform error", "collection", coll.Name, "error", err)
-			docID, idErr := transform.SerializeID(event.DocumentID)
-			errKind := mongo.ErrTypeMismatch
-			if idErr != nil {
-				docID = fmt.Sprintf("%v", event.DocumentID)
-				errKind = mongo.ErrIDMissing
-			}
-			err = dlqWriter.Write(ctx, mongo.DLQEntry{
-				Collection:   coll.Name,
-				DocumentID:   docID,
-				Operation:    event.Operation,
-				ErrorKind:    errKind,
-				ErrorMessage: err.Error(),
-				ClusterTime:  event.ClusterTime,
-				CreatedAt:    time.Now(),
-			})
-			if err != nil {
-				slog.Error("DLQ write error", "collection", coll.Name, "error", err)
+			entry := transformFailureEntry(coll.Name, event.DocumentID, event.Operation, event.ClusterTime, err)
+			// An event in neither turbopuffer nor the DLQ must stop the stream:
+			// the next flush would save a resume token past it.
+			if err := dlqWriter.Write(ctx, entry); err != nil {
+				return fmt.Errorf("DLQ write for document %v: %w", event.DocumentID, err)
 			}
 			continue
 		}
 
-		if err := batcher.Add(ctx, action, stream.ResumeToken()); err != nil {
+		if err := batcher.Add(ctx, actions, stream.ResumeToken()); err != nil {
 			return fmt.Errorf("batch flush failed: %w", err)
 		}
 	}
 
-	if err := batcher.Flush(ctx); err != nil {
-		slog.Error("final flush failed", "collection", coll.Name, "error", err)
-	}
-
-	if _, err := stream.Event(); err != nil {
+	if err := stream.Err(); err != nil {
 		var serverErr mongodriver.ServerError
 		if errors.As(err, &serverErr) && serverErr.HasErrorLabel("NonResumableChangeStreamError") {
 			slog.Error("oplog position lost: change stream is non-resumable, re-backfill required",
 				"collection", coll.Name, "error", err)
-			return fmt.Errorf("oplog position lost (re-backfill required): %w", err)
+			return fmt.Errorf("%w: %w", errRebackfillRequired, err)
 		}
 		return fmt.Errorf("change stream error: %w", err)
 	}
 	return nil
 }
 
-// runCollectionCDCDirect is the default path: change stream → batcher → turbopuffer.
-func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (direct)", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
+// transformFailureEntry builds the DLQ entry for a document that could not be
+// transformed. The change stream and backfill share it so that a failure is
+// classified the same way on both paths.
+func transformFailureEntry(collection string, id any, op mongo.Operation, clusterTime uint64, transformErr error) mongo.DLQEntry {
+	docID, err := transform.SerializeID(id)
+	if err != nil {
+		// Fall back to the printed _id so an operator can still find the document.
+		docID = fmt.Sprintf("%v", id)
+	}
+	return mongo.DLQEntry{
+		Collection:   collection,
+		DocumentID:   docID,
+		Operation:    op,
+		ErrorKind:    transformErrorKind(transformErr),
+		ErrorMessage: transformErr.Error(),
+		ClusterTime:  clusterTime,
+		CreatedAt:    time.Now(),
+	}
+}
 
-	state, err := store.LoadCollectionState(ctx, coll.Name)
+// transformErrorKind classifies a transform failure by the sentinel it wraps.
+func transformErrorKind(err error) mongo.ErrorKind {
+	switch {
+	case errors.Is(err, transform.ErrInvalidID):
+		return mongo.ErrIDMissing
+	case errors.Is(err, transform.ErrNamespaceUnresolved):
+		return mongo.ErrNamespaceUnresolved
+	case errors.Is(err, transform.ErrTypeMismatch):
+		return mongo.ErrTypeMismatch
+	default:
+		return mongo.ErrUnknown
+	}
+}
+
+// closeBatcher closes batcher, flushing the events it still holds, and joins
+// any error to *errp. The CDC paths defer it, so it usually runs at shutdown
+// with ctx already cancelled; the flush runs on a context that only timeout
+// bounds.
+func closeBatcher(ctx context.Context, batcher *batch.Batcher, timeout time.Duration, errp *error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	err := batcher.Close(ctx)
+	// Close repeats the batcher's first flush error, which *errp already
+	// carries if an Add returned it to consumeStream.
+	if err != nil && !errors.Is(*errp, err) {
+		*errp = errors.Join(*errp, fmt.Errorf("final flush: %w", err))
+	}
+}
+
+// runCDCDirect is the default path: change stream → batcher → turbopuffer.
+func (p *collectionPipeline) runCDCDirect(ctx context.Context, global config.GlobalConfig, status *health.Status) (err error) {
+	slog.Info("starting CDC (direct)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
+
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken)
+	stream, err := p.store.OpenChangeStream(ctx, p.coll.Name, state.ChangeStreamResumeToken, p.coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
 	defer stream.Close(ctx)
 
-	namespace := coll.Mapping.Namespace
-	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
+	namespace := p.coll.Mapping.Namespace.String()
 
-	batcher := batch.New(ctx, cfg.Global, func(
+	batcher := batch.New(ctx, global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		flushStart := time.Now()
-		if err := w.WriteBatch(ctx, namespace, schema, actions); err != nil {
+		if err := p.writer.WriteBatch(ctx, p.coll.Name, p.schema, actions); err != nil {
 			return fmt.Errorf("write batch: %w", err)
 		}
 		slog.Info("flush",
@@ -176,49 +242,47 @@ func runCollectionCDCDirect(ctx context.Context, cfg *config.AppConfig, store *m
 			"flushDuration", time.Since(flushStart),
 		)
 
-		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
-			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
+		if err := p.store.SaveResumeToken(ctx, p.coll.Name, resumeToken); err != nil {
+			slog.Error("failed to save resume token", "collection", p.coll.Name, "error", err)
 		}
 
-		status.SetCollectionFlushTime(coll.Name, time.Now())
+		status.SetCollectionFlushTime(p.coll.Name, time.Now())
 		return nil
 	})
+	defer closeBatcher(ctx, batcher, global.ShutdownTimeout(), &err)
 
-	return consumeStream(ctx, stream, batcher, coll, dlqWriter)
+	return consumeStream(ctx, stream, batcher, p.coll, p.dlq)
 }
 
-// runCollectionCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
-func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *mongo.Store, w *writer.Writer, dlqWriter mongo.DLQWriter, coll config.CollectionConfig, status *health.Status) error {
-	slog.Info("starting CDC (spooled)", "collection", coll.Name, "namespace", coll.Mapping.Namespace)
+// runCDCSpooled is the durable path: change stream → batcher → spool → delivery → turbopuffer.
+func (p *collectionPipeline) runCDCSpooled(ctx context.Context, global config.GlobalConfig) (err error) {
+	slog.Info("starting CDC (spooled)", "collection", p.coll.Name, "namespace", p.coll.Mapping.Namespace.String())
 
-	state, err := store.LoadCollectionState(ctx, coll.Name)
+	state, err := p.store.LoadCollectionState(ctx, p.coll.Name)
 	if err != nil {
 		return err
 	}
 
-	stream, err := store.OpenChangeStream(ctx, coll.Name, state.ChangeStreamResumeToken)
+	stream, err := p.store.OpenChangeStream(ctx, p.coll.Name, state.ChangeStreamResumeToken, p.coll.Mapping.Namespace.IsDynamic())
 	if err != nil {
 		return err
 	}
 	defer stream.Close(ctx)
 
-	spoolDir := cfg.Global.SpoolDir
+	spoolDir := global.SpoolDir
 	if spoolDir == "" {
 		spoolDir = config.DefaultSpoolDir
 	}
-	spoolDir = filepath.Join(spoolDir, coll.Name)
+	spoolDir = filepath.Join(spoolDir, p.coll.Name)
 	sp, err := spool.Open(spoolDir)
 	if err != nil {
 		return fmt.Errorf("opening spool: %w", err)
 	}
-	defer sp.Close()
 
-	namespace := coll.Mapping.Namespace
-	schema := turbopuffer.BuildSchema(coll.Mapping.Fields)
-	nextSegment := state.SpoolSegment + 1
-	signal := make(chan struct{}, 1)
+	namespace := p.coll.Mapping.Namespace.String()
+	appended := make(chan struct{}, 1)
 
-	batcher := batch.New(ctx, cfg.Global, func(
+	batcher := batch.New(ctx, global, func(
 		ctx context.Context, actions []transform.Action, resumeToken []byte,
 	) error {
 		data, err := json.Marshal(actions)
@@ -226,50 +290,39 @@ func runCollectionCDCSpooled(ctx context.Context, cfg *config.AppConfig, store *
 			return fmt.Errorf("serialize batch: %w", err)
 		}
 
-		if err := sp.Write(nextSegment, data); err != nil {
+		segment, err := sp.Append(data)
+		if err != nil {
 			return fmt.Errorf("spool write: %w", err)
 		}
 
-		if err := store.SaveResumeToken(ctx, coll.Name, resumeToken); err != nil {
-			slog.Error("failed to save resume token", "collection", coll.Name, "error", err)
-		}
-		if err := store.SaveSpoolSegment(ctx, coll.Name, nextSegment); err != nil {
-			slog.Error("failed to save spool segment", "collection", coll.Name, "error", err)
+		if err := p.store.SaveResumeToken(ctx, p.coll.Name, resumeToken); err != nil {
+			slog.Error("failed to save resume token", "collection", p.coll.Name, "error", err)
 		}
 
 		slog.Info("spool flush",
 			"namespace", namespace,
 			"batchSize", len(actions),
-			"segment", nextSegment,
+			"segment", segment,
 		)
 
-		nextSegment++
-
 		select {
-		case signal <- struct{}{}:
+		case appended <- struct{}{}:
 		default:
 		}
 		return nil
 	})
+	// Runs after delivery has stopped. The last segment stays on disk for the
+	// next run to deliver.
+	defer closeBatcher(ctx, batcher, global.ShutdownTimeout(), &err)
 
-	// Determine where delivery starts: lowest existing segment on disk, or next expected.
-	segments, err := sp.Segments()
-	if err != nil {
-		return fmt.Errorf("listing spool segments: %w", err)
-	}
-	startDeliver := nextSegment
-	if len(segments) > 0 {
-		startDeliver = segments[0]
-	}
-
-	var deliveryWg sync.WaitGroup
-	deliveryWg.Add(1)
-	go func() {
-		defer deliveryWg.Done()
-		w.RunSpoolDelivery(ctx, sp, namespace, schema, startDeliver, signal)
-	}()
-
-	err = consumeStream(ctx, stream, batcher, coll, dlqWriter)
-	deliveryWg.Wait()
-	return err
+	// Delivery and the change stream stop together: whichever fails first
+	// cancels the other, and Wait returns its error.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return p.writer.RunSpoolDelivery(gctx, sp, p.coll.Name, p.schema, appended)
+	})
+	g.Go(func() error {
+		return consumeStream(gctx, stream, batcher, p.coll, p.dlq)
+	})
+	return g.Wait()
 }

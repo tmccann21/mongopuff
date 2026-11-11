@@ -19,16 +19,20 @@ func (s *Store) NewDLQWriter() DLQWriter {
 	return &dlqWriter{coll: s.db.Collection(mongopuffDLQCollection)}
 }
 
-func (d *dlqWriter) Write(ctx context.Context, entry DLQEntry) error {
-	if _, err := d.coll.InsertOne(ctx, entry); err != nil {
+func (d *dlqWriter) Write(ctx context.Context, entries ...DLQEntry) error {
+	// InsertMany rejects an empty slice.
+	if len(entries) == 0 {
+		return nil
+	}
+	if _, err := d.coll.InsertMany(ctx, entries); err != nil {
 		return fmt.Errorf("writing to DLQ: %w", err)
 	}
 	return nil
 }
 
 type DLQStoredEntry struct {
-	ID bson.ObjectID `bson:"_id"`
-	DLQEntry        `bson:",inline"`
+	ID       bson.ObjectID `bson:"_id"`
+	DLQEntry `bson:",inline"`
 }
 
 func (s *Store) ListDLQ(ctx context.Context, collection string, limit int64) ([]DLQStoredEntry, error) {

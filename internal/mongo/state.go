@@ -17,7 +17,7 @@ const (
 )
 
 type Store struct {
-	db *mongo.Database
+	db     *mongo.Database
 	client *mongo.Client
 }
 
@@ -72,12 +72,6 @@ func (s *Store) SaveLastFlushTime(ctx context.Context, collection string, lastFl
 	return err
 }
 
-func (s *Store) SaveSpoolSegment(ctx context.Context, collection string, segment uint32) error {
-	coll := s.db.Collection(mongopuffStateCollection)
-	_, err := coll.UpdateOne(ctx, bson.M{"_id": collection}, bson.M{"$set": bson.M{"spoolSegment": segment}}, options.UpdateOne().SetUpsert(true))
-	return err
-}
-
 func (s *Store) LoadCollectionState(ctx context.Context, collection string) (CollectionState, error) {
 	coll := s.db.Collection(mongopuffStateCollection)
 
@@ -92,8 +86,17 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 	return cs, nil
 }
 
-func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte) (*LiveChangeStream, error) {
-	return OpenChangeStream(ctx, s.db, collection, resumeToken)
+// OpenChangeStream opens a change stream reader for a single collection
+// This is the package-level function using the store's database directly
+func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
+	return OpenChangeStream(ctx, s.db, collection, resumeToken, prePostImages)
+}
+
+// ListCollectionSpecifications returns the listCollections entries for the
+// named collections. Names that do not exist are absent from the result.
+func (s *Store) ListCollectionSpecifications(ctx context.Context, names []string) ([]mongo.CollectionSpecification, error) {
+	filter := bson.D{{Key: "name", Value: bson.D{{Key: "$in", Value: names}}}}
+	return s.db.ListCollectionSpecifications(ctx, filter)
 }
 
 func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
@@ -105,7 +108,7 @@ func (s *Store) PingOperationTime(ctx context.Context) (uint64, error) {
 
 	ts, ok := result["operationTime"].(bson.Timestamp)
 	if !ok {
-		return 0, fmt.Errorf("operationTime not found or unexpected type in ping response")
+		return 0, errors.New("operationTime not found or unexpected type in ping response")
 	}
 
 	return uint64(ts.T)<<32 | uint64(ts.I), nil
