@@ -87,7 +87,7 @@ func (s *Store) LoadCollectionState(ctx context.Context, collection string) (Col
 }
 
 // OpenChangeStream opens a change stream reader for a single collection
-// this is the package-level function using the store's database directly
+// This is the package-level function using the store's database directly
 func (s *Store) OpenChangeStream(ctx context.Context, collection string, resumeToken []byte, prePostImages bool) (*LiveChangeStream, error) {
 	return OpenChangeStream(ctx, s.db, collection, resumeToken, prePostImages)
 }
